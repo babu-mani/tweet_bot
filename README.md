@@ -25,16 +25,15 @@ This bot is configured to run via two separate GitHub Actions workflows:
 
 ## Project Structure
 
+```text
 .
 ├── .github/
-│ └── workflows/
-│ ├── global-update.yml
-│ └── mtf-update.yml
+│   └── workflows/
+│       ├── global-update.yml
+│       └── mtf-update.yml
 ├── font/
-│ └── Roboto-Bold.ttf
+│   └── Roboto-Bold.ttf
 ├── .gitignore
 ├── market_bot.py
 ├── README.md
 └── requirements.txt
-
-
