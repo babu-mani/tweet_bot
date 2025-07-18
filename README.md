@@ -37,5 +37,4 @@ This bot is configured to run via two separate GitHub Actions workflows:
 ├── README.md
 └── requirements.txt
 
-Copy
-Edit
+
