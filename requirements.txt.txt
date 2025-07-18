@@ -1,0 +1,6 @@
+requests
+tweepy
+yfinance
+beautifulsoup4
+Pillow
+python-dotenv
