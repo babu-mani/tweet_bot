@@ -3,7 +3,7 @@ name: Post MTF Insights Update
 on:
   schedule:
     # Runs at 03:15 UTC, which is 8:45 AM IST
-    - cron: '45 3 * * *'
+    - cron: '15 3 * * *'
   workflow_dispatch: # Allows manual running
 
 jobs:
