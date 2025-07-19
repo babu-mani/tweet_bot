@@ -9,7 +9,15 @@
   ],
   "routes": [
     {
-      "src": "/(.*)",
+      "src": "/global-market-update",
+      "dest": "api/index.py"
+    },
+    {
+      "src": "/mtf-insights-update",
+      "dest": "api/index.py"
+    },
+    {
+      "src": "/",
       "dest": "api/index.py"
     }
   ]
