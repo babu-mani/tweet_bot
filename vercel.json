@@ -12,13 +12,5 @@
       "src": "/(.*)",
       "dest": "api/index.py"
     }
-  ],
-  "functions": {
-    "api/index.py": {
-      "includeFiles": [
-        "api/Roboto-Bold.ttf",
-        "api/tweet_bot_logic.py"
-      ]
-    }
-  }
+  ]
 }
