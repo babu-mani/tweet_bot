@@ -1,6 +1,15 @@
+<<<<<<< HEAD
 requests
 tweepy
 yfinance
 beautifulsoup4
 Pillow
 python-dotenv
+=======
+requests
+tweepy
+yfinance
+beautifulsoup4
+Pillow
+python-dotenv
+>>>>>>> 688a7aa13d1472fc35256b0b34f4a2dff982ca4b
