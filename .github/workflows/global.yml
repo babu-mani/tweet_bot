@@ -1,7 +1,8 @@
 name: Post Global Market Update
 on:
-  push:
-    branches: [ main ]
+  schedule:
+    # Runs at 07:52 UTC, which is 1:22 PM IST
+    - cron: '52 7 * * *'
   workflow_dispatch:
 jobs:
   build-and-post:
