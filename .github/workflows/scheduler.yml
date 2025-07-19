@@ -1,8 +1,8 @@
 name: Daily Scheduler Trigger
 on:
   schedule:
-    # Runs at 03:00 UTC, which is 8:30 AM IST
-    - cron: '0 3 * * *'
+    # Runs at 07:35 UTC, which is 1:05 PM IST
+    - cron: '35 7 * * *'
 jobs:
   trigger-push:
     runs-on: ubuntu-latest
