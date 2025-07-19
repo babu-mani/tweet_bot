@@ -4,20 +4,16 @@
     {
       "src": "api/index.py",
       "use": "@vercel/python",
-      "config": { "maxLambdaSize": "15mb", "runtime": "python3.10" }
+      "config": {
+        "maxLambdaSize": "15mb",
+        "runtime": "python3.10",
+        "wsgi_app": "api/index.py"
+      }
     }
   ],
   "routes": [
     {
-      "src": "/global-market-update",
-      "dest": "api/index.py"
-    },
-    {
-      "src": "/mtf-insights-update",
-      "dest": "api/index.py"
-    },
-    {
-      "src": "/",
+      "src": "/(.*)",
       "dest": "api/index.py"
     }
   ]
