@@ -6,3 +6,5 @@ beautifulsoup4
 requests
 Pillow
 python-dotenv
+pandas
+numpy
