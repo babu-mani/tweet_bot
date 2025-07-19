@@ -1,0 +1,14 @@
+name: Scheduler Test
+
+on:
+  schedule:
+    # Runs at 04:00 UTC, which is 9:30 AM IST
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+jobs:
+  test-job:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Print a message
+        run: echo "Hello World! The scheduler is working."
