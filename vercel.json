@@ -16,7 +16,7 @@
   "functions": {
     "api/index.py": {
       "includeFiles": [
-        "api/font/Roboto-Bold.ttf",
+        "api/Roboto-Bold.ttf",
         "api/tweet_bot_logic.py"
       ]
     }
