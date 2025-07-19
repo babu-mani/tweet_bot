@@ -2,8 +2,9 @@ name: Post Global Market Update
 
 on:
   schedule:
-    # Runs at 03:27 UTC, which is 8:57 AM IST
-    - cron: '27 3 * * *'
+    # Runs at 03:35 UTC, which is 9:05 AM IST
+    # The comment below is to force a schedule reset
+    - cron: '35 3 * * *'
   workflow_dispatch: # Allows manual running
 
 jobs:
