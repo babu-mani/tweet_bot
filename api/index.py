@@ -291,3 +291,5 @@ def mtf_insights_update():
 @app.route('/', methods=['GET'])
 def home():
     return jsonify({"status": "ok", "message": "Tweet Bot API is running!"}), 200
+# This line explicitly exposes the Flask app for Vercel's serverless runtime
+handler = app
