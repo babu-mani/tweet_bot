@@ -2,8 +2,8 @@ name: Post MTF Insights Update
 
 on:
   schedule:
-    # Runs at 03:15 UTC, which is 8:45 AM IST
-    - cron: '15 3 * * *'
+    # Runs at 03:28 UTC, which is 8:58 AM IST
+    - cron: '28 3 * * *'
   workflow_dispatch: # Allows manual running
 
 jobs:
@@ -27,6 +27,4 @@ jobs:
           TWITTER_API_SECRET: ${{ secrets.TWITTER_API_SECRET }}
           TWITTER_ACCESS_TOKEN: ${{ secrets.TWITTER_ACCESS_TOKEN }}
           TWITTER_ACCESS_TOKEN_SECRET: ${{ secrets.TWITTER_ACCESS_TOKEN_SECRET }}
-        # --- THIS IS THE FIX ---
-        # Added the --post flag to ensure the tweet is sent
         run: python tweet_bot.py mtf --post
