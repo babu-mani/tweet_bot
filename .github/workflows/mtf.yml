@@ -1,7 +1,8 @@
 name: Post MTF Insights Update
 on:
-  push:
-    branches: [ main ]
+  schedule:
+    # Runs at 07:53 UTC, which is 1:23 PM IST
+    - cron: '53 7 * * *'
   workflow_dispatch:
 jobs:
   build-and-post:
