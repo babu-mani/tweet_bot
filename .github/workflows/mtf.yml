@@ -2,9 +2,8 @@ name: Post MTF Insights Update
 
 on:
   schedule:
-    # Runs at 03:36 UTC, which is 9:06 AM IST
-    # The comment below is to force a schedule reset
-    - cron: '36 3 * * *'
+    # Runs at 06:19 UTC, which is 11:49 AM IST
+    - cron: '19 6 * * *'
   workflow_dispatch: # Allows manual running
 
 jobs:
