@@ -1,6 +1,8 @@
-requests
+Flask
+gunicorn
 tweepy
 yfinance
 beautifulsoup4
+requests
 Pillow
 python-dotenv
