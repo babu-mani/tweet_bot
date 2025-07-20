@@ -51,14 +51,39 @@ def fetch_gift_nifty():
         return None, None
 
 def get_yfinance_data(ticker_symbol):
-    """Fetches live data for a ticker. Returns None on failure."""
+    """
+    Fetches live data for a ticker. Tries longer periods if 2d fails to ensure
+    at least two distinct historical close prices are obtained for change calculation.
+    Returns (current_close, change_percent) or (None, None) on failure.
+    """
     try:
+        # Try with "2d" first (standard case)
         hist = yf.Ticker(ticker_symbol).history(period="2d")
+
+        # If not enough history, try a longer period to find two distinct days
         if len(hist) < 2:
-            print(f"ERROR: Not enough history for {ticker_symbol}.")
+            print(f"WARNING: Not enough history for {ticker_symbol} with '2d' period. Trying '5d'...")
+            hist = yf.Ticker(ticker_symbol).history(period="5d") # Try 5 days
+
+            if len(hist) < 2:
+                print(f"WARNING: Still not enough history for {ticker_symbol} with '5d' period. Trying '1wk'...")
+                hist = yf.Ticker(ticker_symbol).history(period="1wk") # Try 1 week
+
+        # After trying different periods, check if we finally have at least 2 rows
+        if len(hist) < 2:
+            print(f"ERROR: Failed to get at least 2 historical data points for {ticker_symbol} even after trying longer periods.")
             return None, None
-        change = ((hist['Close'].iloc[-1] - hist['Close'].iloc[-2]) / hist['Close'].iloc[-2]) * 100
-        return f"{hist['Close'].iloc[-1]:,.2f}", f"{change:+.2f}%"
+
+        # Get the most recent close
+        current_close = hist['Close'].iloc[-1]
+        
+        # Get the previous close. If the last two points are from the same day (e.g., due to a late run),
+        # this might not be strictly 'previous day'. But for daily periods, it's usually fine.
+        previous_close = hist['Close'].iloc[-2]
+
+        change = ((current_close - previous_close) / previous_close) * 100
+        return f"{current_close:,.2f}", f"{change:+.2f}%"
+
     except Exception as e:
         print(f"ERROR: yfinance fetch for {ticker_symbol} failed ({e}).")
         return None, None
