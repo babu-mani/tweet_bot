@@ -164,7 +164,7 @@ def create_market_update_image(data):
 
     y_pos = 360
     data_font = get_font(42)
-    for key in ["GIFTNIFTY", "Nikkei 225", "Dow Jones Futures", "S&P 500", "Nasdaq", "Hang Seng"]:
+    for key in ["GIFTNIFTY", "Nikkei 225", "Dow Jones", "S&P 500", "Nasdaq", "Hang Seng"]: # <--- CHANGED HERE
         value, change = data.get(key, ("N/A", "+0.00%"))
         color = (255, 80, 80) if change.startswith('-') else (80, 255, 80)
         draw_text(draw, (100, y_pos), f"{key}:", data_font, (255,255,255), "ls")
