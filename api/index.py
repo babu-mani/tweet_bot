@@ -194,11 +194,10 @@ def create_mtf_insights_image(data):
     img.save(filename)
     return filename
 
-# --- Text & Twitter ---
 def build_tweet_text(data, job_type):
     if job_type == 'global':
         lines = [f"Global Market Update – {datetime.now().strftime('%d %b, %Y')}\n"]
-        for key in ["GIFTNIFTY", "Nikkei 225", "Dow Jones Futures", "S&P 500", "Nasdaq", "Hang Seng"]:
+        for key in ["GIFTNIFTY", "Nikkei 225", "Dow Jones", "S&P 500", "Nasdaq", "Hang Seng"]: # <--- CHANGED HERE
             value, change = data.get(key, ("N/A", "+0.00%"))
             lines.append(f"{key}: {value} ({change})")
         lines.append("\n#GIFTNIFTY #Nifty #DowJones #Nasdaq #Nikkei #HangSeng")
