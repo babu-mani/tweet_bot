@@ -93,7 +93,7 @@ def fetch_global_market_data():
     print("Fetching Global Market data...")
     data = {}
     tickers = {
-        "Nikkei 225": "^N225", "Dow Jones Futures": "YM=F",
+        "Nikkei 225": "^N225", "Dow Jones": "^DJI",
         "S&P 500": "^GSPC", "Nasdaq": "^IXIC", "Hang Seng": "^HSI"
     }
     gn_val, gn_chg = fetch_gift_nifty()
