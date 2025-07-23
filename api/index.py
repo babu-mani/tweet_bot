@@ -97,7 +97,7 @@ def fetch_global_market_data():
     print("Fetching Global Market data...")
     data = {}
     tickers = {
-        "Nikkei 225": "^N225", "Dow Jones Futures": "YM=F", # <--- Dow Jones Futures with YM=F
+        "Nikkei 225": "^N225", "Dow Jones Futures": "YM=F",
         "S&P 500": "^GSPC", "Nasdaq": "^IXIC", "Hang Seng": "^HSI"
     }
     gn_val, gn_chg = fetch_gift_nifty()
@@ -149,7 +149,11 @@ def fetch_mtf_data():
             insights[net_book_label] = f"₹{captured_value_with_sign} Cr"
             print(f"✓ '{net_book_label}' data fetched dynamically.")
         else:
-            print(f"ERROR: Could not find dynamic 'Net Book' data. Page text around issue: {page_text[page_text.find('Net Book'):page_text.find('Cr', page_text.find('Net Book'))+30]}")
+            # Added more context to the error message for debugging
+            start_idx = page_text.find('Net Book')
+            end_idx = page_text.find('Cr', start_idx)
+            context = page_text[start_idx:end_idx+30] if start_idx != -1 and end_idx != -1 else "N/A"
+            print(f"ERROR: Could not find dynamic 'Net Book' data. Page text around issue: {context}")
             return None # Fail if Net Book is not found
 
         # Fetch fixed patterns
@@ -198,7 +202,7 @@ def create_market_update_image(data):
 
     y_pos = 360
     data_font = get_font(42)
-    for key in ["GIFTNIFTY", "Nikkei 225", "Dow Jones Futures", "S&P 500", "Nasdaq", "Hang Seng"]: # <--- Dow Jones Futures for Image
+    for key in ["GIFTNIFTY", "Nikkei 225", "Dow Jones Futures", "S&P 500", "Nasdaq", "Hang Seng"]:
         value, change = data.get(key, ("N/A", "+0.00%"))
         color = (255, 80, 80) if change.startswith('-') else (80, 255, 80)
         draw_text(draw, (100, y_pos), f"{key}:", data_font, (255,255,255), "ls")
