@@ -1,4 +1,4 @@
-# api/index.py
+# -*- coding: utf-8 -*-
 # Author: ChartWizMani
 # Date: 19-Jul-2025 (Original creation date)
 # Description: Generates and posts financial market updates to Twitter. This is the final, stable version.
@@ -131,9 +131,10 @@ def fetch_mtf_data():
         # Define patterns for fixed keys
         fixed_patterns = {
             "Positions Added": r'Positions Added:\s*\+?₹\s*([\d,]+\.?\d*)\s*Cr',
-            "Positions Liquidated": r'Positions Liquidated:\s*-?₹\s*([\d,]+\.?\d*)\s*Cr',
+            "Positions Liquidated": r'Positions Liquidated:\s*(?P<sign>[+\-]?)\s*₹\s*(?P<value>[\d,]+\.?\d*)\s*Cr', # <--- UPDATED THIS LINE
             "Industry MTF Book": r'Industry MTF Book:\s*₹\s*([\d,]+\.?\d*)\s*Cr'
         }
+
 
         # Try to find the "Net Book" entry dynamically
         # Look for "Net Book" followed by "Added" or "Liquidated"
@@ -155,14 +156,15 @@ def fetch_mtf_data():
             if not match:
                 print(f"ERROR: Could not find MTF data for '{key}'.")
                 return None
-            insights[key] = f"₹{match.group(1)} Cr"
+            
+            # Special handling for Positions Liquidated to get the sign
+            if key == "Positions Liquidated" and match.groupdict().get('sign') is not None:
+                captured_value_with_sign = f"{match.group('sign')}{match.group('value')}"
+                insights[key] = f"₹{captured_value_with_sign} Cr"
+            else:
+                insights[key] = f"₹{match.group(1)} Cr" # Use group(1) for others
             print(f"✓ '{key}' data fetched.")
 
-        print("✓ MTF data fetched.")
-        return insights
-    except Exception as e:
-        print(f"ERROR: MTF fetch failed ({e}).")
-        return None
 
 # --- Image Generation ---
 def _draw_watermark(draw, width, height):
@@ -241,7 +243,7 @@ def create_mtf_insights_image(data):
 def build_tweet_text(data, job_type):
     if job_type == 'global':
         lines = [f"Global Market Update – {datetime.now().strftime('%d %b, %Y')}\n"]
-        for key in ["GIFTNIFTY", "Nikkei 225", "Dow Jones Futures", "S&P 500", "Nasdaq", "Hang Seng"]: # <--- Dow Jones Futures for Tweet Text
+        for key in ["GIFTNIFTY", "Nikkei 225", "Dow Jones Futures", "S&P 500", "Nasdaq", "Hang Seng"]:
             value, change = data.get(key, ("N/A", "+0.00%"))
             lines.append(f"{key}: {value} ({change})")
         lines.append("\n#GIFTNIFTY #Nifty #DowJones #Nasdaq #Nikkei #HangSeng")
