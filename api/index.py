@@ -1,4 +1,8 @@
 # api/index.py
+# Author: ChartWizMani
+# Date: 19-Jul-2025 (Original creation date)
+# Description: Generates and posts financial market updates to Twitter. This is the final, stable version.
+
 from flask import Flask, jsonify, request
 import os
 import sys
@@ -93,7 +97,7 @@ def fetch_global_market_data():
     print("Fetching Global Market data...")
     data = {}
     tickers = {
-        "Nikkei 225": "^N225", "Dow Jones": "^DJI",
+        "Nikkei 225": "^N225", "Dow Jones Futures": "YM=F", # <--- Dow Jones Futures with YM=F
         "S&P 500": "^GSPC", "Nasdaq": "^IXIC", "Hang Seng": "^HSI"
     }
     gn_val, gn_chg = fetch_gift_nifty()
@@ -122,19 +126,37 @@ def fetch_mtf_data():
         date_match = re.search(r'as on (\w{3} \d{1,2}, \d{4})', page_text)
         report_date = date_match.group(1) if date_match else "Date not found"
 
-        patterns = {
+        insights = {'date': report_date}
+
+        # Define patterns for fixed keys
+        fixed_patterns = {
             "Positions Added": r'Positions Added:\s*\+?₹\s*([\d,]+\.?\d*)\s*Cr',
             "Positions Liquidated": r'Positions Liquidated:\s*-?₹\s*([\d,]+\.?\d*)\s*Cr',
-            "Net Book Added": r'Net Book Added:\s*[+\-]?₹\s*([\d,]+\.?\d*)\s*Cr',
-            "Net Industry MTF Book": r'Industry MTF Book:\s*₹\s*([\d,]+\.?\d*)\s*Cr'
+            "Industry MTF Book": r'Industry MTF Book:\s*₹\s*([\d,]+\.?\d*)\s*Cr'
         }
-        insights = {'date': report_date}
-        for key, pattern in patterns.items():
+
+        # Try to find the "Net Book" entry dynamically
+        # Look for "Net Book" followed by "Added" or "Liquidated"
+        net_book_pattern = r'(Net Book (?:Added|Liquidated)):\s*[+\-]?₹\s*([\d,]+\.?\d*)\s*Cr'
+        net_book_match = re.search(net_book_pattern, page_text)
+
+        if net_book_match:
+            # Use the actual matched label (e.g., "Net Book Added" or "Net Book Liquidated")
+            net_book_label = net_book_match.group(1)
+            insights[net_book_label] = f"₹{net_book_match.group(2)} Cr"
+            print(f"✓ '{net_book_label}' data fetched dynamically.")
+        else:
+            print("ERROR: Could not find dynamic 'Net Book' data.")
+            return None # Fail if Net Book is not found
+
+        # Fetch fixed patterns
+        for key, pattern in fixed_patterns.items():
             match = re.search(pattern, page_text)
             if not match:
                 print(f"ERROR: Could not find MTF data for '{key}'.")
                 return None
             insights[key] = f"₹{match.group(1)} Cr"
+            print(f"✓ '{key}' data fetched.")
 
         print("✓ MTF data fetched.")
         return insights
@@ -164,7 +186,7 @@ def create_market_update_image(data):
 
     y_pos = 360
     data_font = get_font(42)
-    for key in ["GIFTNIFTY", "Nikkei 225", "Dow Jones", "S&P 500", "Nasdaq", "Hang Seng"]: # <--- CHANGED HERE
+    for key in ["GIFTNIFTY", "Nikkei 225", "Dow Jones Futures", "S&P 500", "Nasdaq", "Hang Seng"]: # <--- Dow Jones Futures for Image
         value, change = data.get(key, ("N/A", "+0.00%"))
         color = (255, 80, 80) if change.startswith('-') else (80, 255, 80)
         draw_text(draw, (100, y_pos), f"{key}:", data_font, (255,255,255), "ls")
@@ -184,7 +206,28 @@ def create_mtf_insights_image(data):
     draw_text(draw, (WIDTH/2, 230), f"(as on {data.get('date')})", get_font(48), (200,180,200))
 
     y_pos = 380
-    for key in ["Positions Added", "Positions Liquidated", "Net Book Added", "Net Industry MTF Book"]:
+    # The order of keys for the image needs to be consistent with the tweet
+    # We'll use the same dynamic logic as in build_tweet_text
+    ordered_keys_image = [
+        "Positions Added",
+        "Positions Liquidated",
+        # The actual key for Net Book will be determined dynamically
+        # We'll add it if it exists in data
+        "Industry MTF Book"
+    ]
+
+    # Add the dynamic Net Book key if it was found
+    net_book_dynamic_key_image = None
+    for k in data.keys():
+        if k.startswith("Net Book"):
+            net_book_dynamic_key_image = k
+            break
+    
+    if net_book_dynamic_key_image:
+        # Insert the dynamic Net Book key after "Positions Liquidated"
+        ordered_keys_image.insert(2, net_book_dynamic_key_image)
+
+    for key in ordered_keys_image:
         draw_text(draw, (80, y_pos), f"- {key}:", get_font(46), (255,255,255), "ls")
         draw_text(draw, (WIDTH - 80, y_pos), data.get(key, "N/A"), get_font(46), (255,223,186), "rs")
         y_pos += 120
@@ -194,16 +237,38 @@ def create_mtf_insights_image(data):
     img.save(filename)
     return filename
 
+# --- Text & Twitter ---
 def build_tweet_text(data, job_type):
     if job_type == 'global':
         lines = [f"Global Market Update – {datetime.now().strftime('%d %b, %Y')}\n"]
-        for key in ["GIFTNIFTY", "Nikkei 225", "Dow Jones", "S&P 500", "Nasdaq", "Hang Seng"]: # <--- CHANGED HERE
+        for key in ["GIFTNIFTY", "Nikkei 225", "Dow Jones Futures", "S&P 500", "Nasdaq", "Hang Seng"]: # <--- Dow Jones Futures for Tweet Text
             value, change = data.get(key, ("N/A", "+0.00%"))
             lines.append(f"{key}: {value} ({change})")
         lines.append("\n#GIFTNIFTY #Nifty #DowJones #Nasdaq #Nikkei #HangSeng")
     else: # mtf
         lines = [f"MTF Insights (as on {data.get('date')})\n"]
-        for key in ["Positions Added", "Positions Liquidated", "Net Book Added", "Net Industry MTF Book"]:
+        
+        # Define the order of keys for the tweet
+        ordered_keys = [
+            "Positions Added",
+            "Positions Liquidated",
+            # The actual key for Net Book will be determined dynamically
+            # We'll add it if it exists in data
+            "Industry MTF Book"
+        ]
+
+        # Add the dynamic Net Book key if it was found
+        net_book_dynamic_key = None
+        for k in data.keys():
+            if k.startswith("Net Book"):
+                net_book_dynamic_key = k
+                break
+        
+        if net_book_dynamic_key:
+            # Insert the dynamic Net Book key after "Positions Liquidated"
+            ordered_keys.insert(2, net_book_dynamic_key)
+
+        for key in ordered_keys:
             lines.append(f"- {key}: {data.get(key, 'N/A')}")
         lines.append("\n#MTF #nifty #GIFTNIFTY #banknifty")
     return "\n".join(lines)
