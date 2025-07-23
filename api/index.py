@@ -131,23 +131,25 @@ def fetch_mtf_data():
         # Define patterns for fixed keys
         fixed_patterns = {
             "Positions Added": r'Positions Added:\s*\+?₹\s*([\d,]+\.?\d*)\s*Cr',
-            "Positions Liquidated": r'Positions Liquidated:\s*(?P<sign>[+\-]?)\s*₹\s*(?P<value>[\d,]+\.?\d*)\s*Cr', # <--- UPDATED THIS LINE
+            "Positions Liquidated": r'Positions Liquidated:\s*(?P<sign>[+\-]?)\s*₹\s*(?P<value>[\d,]+\.?\d*)\s*Cr',
             "Industry MTF Book": r'Industry MTF Book:\s*₹\s*([\d,]+\.?\d*)\s*Cr'
         }
 
-
         # Try to find the "Net Book" entry dynamically
         # Look for "Net Book" followed by "Added" or "Liquidated"
-        net_book_pattern = r'(Net Book (?:Added|Liquidated)):\s*[+\-]?₹\s*([\d,]+\.?\d*)\s*Cr'
+        # Capture the optional sign along with the number
+        net_book_pattern = r'(Net Book (?:Added|Liquidated)):\s*(?P<sign>[+\-]?)\s*₹\s*(?P<value>[\d,]+\.?\d*)\s*Cr'
         net_book_match = re.search(net_book_pattern, page_text)
 
         if net_book_match:
             # Use the actual matched label (e.g., "Net Book Added" or "Net Book Liquidated")
             net_book_label = net_book_match.group(1)
-            insights[net_book_label] = f"₹{net_book_match.group(2)} Cr"
+            # Combine the captured sign and value
+            captured_value_with_sign = f"{net_book_match.group('sign')}{net_book_match.group('value')}"
+            insights[net_book_label] = f"₹{captured_value_with_sign} Cr"
             print(f"✓ '{net_book_label}' data fetched dynamically.")
         else:
-            print("ERROR: Could not find dynamic 'Net Book' data.")
+            print(f"ERROR: Could not find dynamic 'Net Book' data. Page text around issue: {page_text[page_text.find('Net Book'):page_text.find('Cr', page_text.find('Net Book'))+30]}")
             return None # Fail if Net Book is not found
 
         # Fetch fixed patterns
@@ -158,13 +160,21 @@ def fetch_mtf_data():
                 return None
             
             # Special handling for Positions Liquidated to get the sign
-            if key == "Positions Liquidated" and match.groupdict().get('sign') is not None:
+            # Check if 'sign' group exists in the match object's groupdict
+            if key == "Positions Liquidated" and 'sign' in match.groupdict():
                 captured_value_with_sign = f"{match.group('sign')}{match.group('value')}"
                 insights[key] = f"₹{captured_value_with_sign} Cr"
             else:
-                insights[key] = f"₹{match.group(1)} Cr" # Use group(1) for others
+                # For other fixed patterns, group(1) is the value
+                insights[key] = f"₹{match.group(1)} Cr"
             print(f"✓ '{key}' data fetched.")
 
+        print("✓ MTF data fetched.")
+        return insights # <--- THIS RETURN WAS MISSING/MISPLACED, CAUSING SYNTAX ERROR
+
+    except Exception as e:
+        print(f"ERROR: MTF fetch failed ({e}).")
+        return None
 
 # --- Image Generation ---
 def _draw_watermark(draw, width, height):
