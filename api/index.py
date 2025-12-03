@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # Author: ChartWizMani
-# Date: 19-Jul-2025 (Original creation date)
-# Description: Generates and posts financial market updates to Twitter. This is the final, stable version.
+# Date: 03-Dec-2025 (Updated for Robust Data Fetching)
+# Description: Generates and posts financial market updates to Twitter.
 
 from flask import Flask, jsonify, request
 import os
@@ -16,30 +16,29 @@ from bs4 import BeautifulSoup
 from PIL import Image, ImageDraw, ImageFont
 from dotenv import load_dotenv
 
+# --- FIX 1: Set yfinance cache to a writable folder to stop "Read-only" errors ---
+yf.set_tz_cache_location("/tmp/yf_tz_cache")
+
 app = Flask(__name__)
 
 # --- Configuration ---
-# FONT_PATH is now set assuming Roboto-Bold.ttf is directly in the 'api' directory
 FONT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Roboto-Bold.ttf")
 
 WIDTH, HEIGHT = 1080, 1080
-load_dotenv() # Load environment variables from .env file
+load_dotenv() 
 
 # --- Font & Drawing Utilities ---
 def get_font(size: int):
-    """Loads the font file. Raises FileNotFoundError if the font is not found."""
     if not os.path.exists(FONT_PATH):
         print(f"FATAL: Font file not found at {FONT_PATH}.")
-        raise FileNotFoundError(f"Font file not found at {FONT_PATH}. Please ensure it's deployed.")
+        raise FileNotFoundError(f"Font file not found at {FONT_PATH}.")
     return ImageFont.truetype(FONT_PATH, size)
 
 def draw_text(draw, position, text, font, fill, anchor="mm"):
-    """A helper function to draw text on the image."""
     draw.text(position, text, font=font, fill=fill, anchor=anchor)
 
 # --- Data Fetching (with Safe-Fail Logic) ---
 def fetch_gift_nifty():
-    """Fetches live GIFT NIFTY data. Returns None on failure."""
     try:
         print("Fetching GIFT NIFTY data...")
         url = "https://groww.in/indices/global-indices/sgx-nifty"
@@ -56,33 +55,25 @@ def fetch_gift_nifty():
 
 def get_yfinance_data(ticker_symbol):
     """
-    Fetches live data for a ticker. Tries longer periods if 2d fails to ensure
-    at least two distinct historical close prices are obtained for change calculation.
-    Returns (current_close, change_percent) or (None, None) on failure.
+    FIX 2: Improved logic. Fetches 1 month of data and picks the last 2 valid points.
+    This handles weekends, holidays, and API gaps automatically.
     """
     try:
-        # Try with "2d" first (standard case)
-        hist = yf.Ticker(ticker_symbol).history(period="2d")
+        # Fetch 1 month. This ensures we have data even if there are holidays/gaps.
+        ticker = yf.Ticker(ticker_symbol)
+        hist = ticker.history(period="1mo")
 
-        # If not enough history, try a longer period to find two distinct days
+        # Drop any empty rows (days where API returned null)
+        hist = hist.dropna()
+
+        # Check if we have at least 2 data points total in the last month
         if len(hist) < 2:
-            print(f"WARNING: Not enough history for {ticker_symbol} with '2d' period. Trying '5d'...")
-            hist = yf.Ticker(ticker_symbol).history(period="5d") # Try 5 days
-
-            if len(hist) < 2:
-                print(f"WARNING: Still not enough history for {ticker_symbol} with '5d' period. Trying '1wk'...")
-                hist = yf.Ticker(ticker_symbol).history(period="1wk") # Try 1 week
-
-        # After trying different periods, check if we finally have at least 2 rows
-        if len(hist) < 2:
-            print(f"ERROR: Failed to get at least 2 historical data points for {ticker_symbol} even after trying longer periods.")
+            print(f"ERROR: Failed to get at least 2 historical data points for {ticker_symbol}.")
             return None, None
 
-        # Get the most recent close
+        # .iloc[-1] is the LATEST available price (Today)
+        # .iloc[-2] is the PREVIOUS available price (Yesterday or last trading day)
         current_close = hist['Close'].iloc[-1]
-        
-        # Get the previous close. If the last two points are from the same day (e.g., due to a late run),
-        # this might not be strictly 'previous day'. But for daily periods, it's usually fine.
         previous_close = hist['Close'].iloc[-2]
 
         change = ((current_close - previous_close) / previous_close) * 100
@@ -93,23 +84,38 @@ def get_yfinance_data(ticker_symbol):
         return None, None
 
 def fetch_global_market_data():
-    """Fetches all global market data. Returns None if any part fails."""
+    """Fetches all global market data. Skips failed tickers instead of crashing."""
     print("Fetching Global Market data...")
     data = {}
+    
+    # NOTE: I recommend swapping YM=F for ^DJI if problems persist, 
+    # but the new logic below should handle YM=F better now.
     tickers = {
         "Nikkei 225": "^N225", "Dow Jones Futures": "YM=F",
         "S&P 500": "^GSPC", "Nasdaq": "^IXIC", "Hang Seng": "^HSI"
     }
+    
     gn_val, gn_chg = fetch_gift_nifty()
-    if gn_val is None: return None
-    data["GIFTNIFTY"] = (gn_val, gn_chg)
-    print("✓ GIFTNIFTY data fetched.")
+    # If GIFT Nifty fails, we can still post the others, or choose to fail. 
+    # Current logic: continue even if GIFT Nifty fails (optional).
+    if gn_val:
+        data["GIFTNIFTY"] = (gn_val, gn_chg)
+        print("✓ GIFTNIFTY data fetched.")
+    else:
+        print("⚠️ GIFTNIFTY failed, skipping.")
+
     for name, symbol in tickers.items():
         val, chg = get_yfinance_data(symbol)
-        if val is None: return None
+        
+        # FIX 3: If one ticker fails, SKIP it. Do not return None.
+        if val is None: 
+            print(f"⚠️ Skipping {name} ({symbol}) due to fetch failure.")
+            continue 
+            
         data[name] = (val, chg)
         print(f"✓ {name} data fetched.")
-    print("✓ All global data fetched.")
+        
+    print("✓ Global data fetch process completed.")
     return data
 
 def fetch_mtf_data():
@@ -128,53 +134,42 @@ def fetch_mtf_data():
 
         insights = {'date': report_date}
 
-        # Define patterns for fixed keys
         fixed_patterns = {
             "Positions Added": r'Positions Added:\s*\+?₹\s*([\d,]+\.?\d*)\s*Cr',
             "Positions Liquidated": r'Positions Liquidated:\s*(?P<sign>[+\-]?)\s*₹\s*(?P<value>[\d,]+\.?\d*)\s*Cr',
             "Industry MTF Book": r'Industry MTF Book:\s*₹\s*([\d,]+\.?\d*)\s*Cr'
         }
 
-        # Try to find the "Net Book" entry dynamically
-        # Look for "Net Book" followed by "Added" or "Liquidated"
-        # Capture the optional sign along with the number
         net_book_pattern = r'(Net Book (?:Added|Liquidated)):\s*(?P<sign>[+\-]?)\s*₹\s*(?P<value>[\d,]+\.?\d*)\s*Cr'
         net_book_match = re.search(net_book_pattern, page_text)
 
         if net_book_match:
-            # Use the actual matched label (e.g., "Net Book Added" or "Net Book Liquidated")
             net_book_label = net_book_match.group(1)
-            # Combine the captured sign and value
             captured_value_with_sign = f"{net_book_match.group('sign')}{net_book_match.group('value')}"
             insights[net_book_label] = f"₹{captured_value_with_sign} Cr"
             print(f"✓ '{net_book_label}' data fetched dynamically.")
         else:
-            # Added more context to the error message for debugging
             start_idx = page_text.find('Net Book')
             end_idx = page_text.find('Cr', start_idx)
             context = page_text[start_idx:end_idx+30] if start_idx != -1 and end_idx != -1 else "N/A"
             print(f"ERROR: Could not find dynamic 'Net Book' data. Page text around issue: {context}")
-            return None # Fail if Net Book is not found
+            return None 
 
-        # Fetch fixed patterns
         for key, pattern in fixed_patterns.items():
             match = re.search(pattern, page_text)
             if not match:
                 print(f"ERROR: Could not find MTF data for '{key}'.")
                 return None
             
-            # Special handling for Positions Liquidated to get the sign
-            # Check if 'sign' group exists in the match object's groupdict
             if key == "Positions Liquidated" and 'sign' in match.groupdict():
                 captured_value_with_sign = f"{match.group('sign')}{match.group('value')}"
                 insights[key] = f"₹{captured_value_with_sign} Cr"
             else:
-                # For other fixed patterns, group(1) is the value
                 insights[key] = f"₹{match.group(1)} Cr"
             print(f"✓ '{key}' data fetched.")
 
         print("✓ MTF data fetched.")
-        return insights # <--- THIS RETURN WAS MISSING/MISPLACED, CAUSING SYNTAX ERROR
+        return insights 
 
     except Exception as e:
         print(f"ERROR: MTF fetch failed ({e}).")
@@ -182,12 +177,11 @@ def fetch_mtf_data():
 
 # --- Image Generation ---
 def _draw_watermark(draw, width, height):
-    # Ensure FONT_PATH is correctly set for the environment
     try:
         font = get_font(28)
     except FileNotFoundError as e:
         print(f"Warning: Watermark font not found. Skipping watermark. Error: {e}")
-        return # Skip drawing watermark if font is missing
+        return 
 
     color = (180, 180, 200)
     date_str = datetime.now().strftime('%d-%b-%Y')
@@ -202,6 +196,7 @@ def create_market_update_image(data):
 
     y_pos = 360
     data_font = get_font(42)
+    # Even if data is missing for a key, .get() will return "N/A" so it won't crash
     for key in ["GIFTNIFTY", "Nikkei 225", "Dow Jones Futures", "S&P 500", "Nasdaq", "Hang Seng"]:
         value, change = data.get(key, ("N/A", "+0.00%"))
         color = (255, 80, 80) if change.startswith('-') else (80, 255, 80)
@@ -211,7 +206,7 @@ def create_market_update_image(data):
         y_pos += 100
 
     _draw_watermark(draw, WIDTH, HEIGHT)
-    filename = "/tmp/global_market_update.png" # Use /tmp for serverless functions
+    filename = "/tmp/global_market_update.png" 
     img.save(filename)
     return filename
 
@@ -222,17 +217,12 @@ def create_mtf_insights_image(data):
     draw_text(draw, (WIDTH/2, 230), f"(as on {data.get('date')})", get_font(48), (200,180,200))
 
     y_pos = 380
-    # The order of keys for the image needs to be consistent with the tweet
-    # We'll use the same dynamic logic as in build_tweet_text
     ordered_keys_image = [
         "Positions Added",
         "Positions Liquidated",
-        # The actual key for Net Book will be determined dynamically
-        # We'll add it if it exists in data
         "Industry MTF Book"
     ]
 
-    # Add the dynamic Net Book key if it was found
     net_book_dynamic_key_image = None
     for k in data.keys():
         if k.startswith("Net Book"):
@@ -240,7 +230,6 @@ def create_mtf_insights_image(data):
             break
     
     if net_book_dynamic_key_image:
-        # Insert the dynamic Net Book key after "Positions Liquidated"
         ordered_keys_image.insert(2, net_book_dynamic_key_image)
 
     for key in ordered_keys_image:
@@ -249,7 +238,7 @@ def create_mtf_insights_image(data):
         y_pos += 120
 
     _draw_watermark(draw, WIDTH, HEIGHT)
-    filename = "/tmp/mtf_insights.png" # Use /tmp for serverless functions
+    filename = "/tmp/mtf_insights.png" 
     img.save(filename)
     return filename
 
@@ -261,19 +250,15 @@ def build_tweet_text(data, job_type):
             value, change = data.get(key, ("N/A", "+0.00%"))
             lines.append(f"{key}: {value} ({change})")
         lines.append("\n#GIFTNIFTY #Nifty #DowJones #Nasdaq #Nikkei #HangSeng")
-    else: # mtf
+    else: 
         lines = [f"MTF Insights (as on {data.get('date')})\n"]
         
-        # Define the order of keys for the tweet
         ordered_keys = [
             "Positions Added",
             "Positions Liquidated",
-            # The actual key for Net Book will be determined dynamically
-            # We'll add it if it exists in data
             "Industry MTF Book"
         ]
 
-        # Add the dynamic Net Book key if it was found
         net_book_dynamic_key = None
         for k in data.keys():
             if k.startswith("Net Book"):
@@ -281,7 +266,6 @@ def build_tweet_text(data, job_type):
                 break
         
         if net_book_dynamic_key:
-            # Insert the dynamic Net Book key after "Positions Liquidated"
             ordered_keys.insert(2, net_book_dynamic_key)
 
         for key in ordered_keys:
@@ -317,51 +301,37 @@ def post_to_twitter(text, image_path):
         return True
     except Exception as e:
         print(f"FATAL: Error posting to Twitter: {e}")
-        raise # Re-raise the exception to be caught by the Flask app
-
+        raise 
 
 @app.route('/global-market-update', methods=['GET'])
 def global_market_update():
-    """
-    Endpoint to trigger the global market update.
-    This will fetch data, create an image, and post to Twitter.
-    """
     try:
         print("Received request for Global Market Update.")
+        
+        # We allow data to be partial now. It returns a dict even if some keys are missing.
         data = fetch_global_market_data()
 
-        if data is None:
+        # Only crash if data is totally empty (meaning everything failed)
+        if not data:
             print("Failed to fetch global market data.")
-            return jsonify({"status": "error", "message": "Could not fetch live global market data."}), 500
+            return jsonify({"status": "error", "message": "Could not fetch any global market data."}), 500
 
         image_file = create_market_update_image(data)
         tweet_text = build_tweet_text(data, 'global')
 
-        # Post to Twitter
         post_to_twitter(tweet_text, image_file)
 
-        # Clean up the temporary image file
         if os.path.exists(image_file):
             os.remove(image_file)
 
         return jsonify({"status": "success", "message": "Global market update posted."}), 200
 
-    except FileNotFoundError as e:
-        print(f"Error: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
-    except ValueError as e:
-        print(f"Error: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
     except Exception as e:
         print(f"An unexpected error occurred: {e}")
         return jsonify({"status": "error", "message": f"An unexpected error occurred: {str(e)}"}), 500
 
 @app.route('/mtf-insights-update', methods=['GET'])
 def mtf_insights_update():
-    """
-    Endpoint to trigger the MTF insights update.
-    This will fetch data, create an image, and post to Twitter.
-    """
     try:
         print("Received request for MTF Insights Update.")
         data = fetch_mtf_data()
@@ -373,26 +343,17 @@ def mtf_insights_update():
         image_file = create_mtf_insights_image(data)
         tweet_text = build_tweet_text(data, 'mtf')
 
-        # Post to Twitter
         post_to_twitter(tweet_text, image_file)
 
-        # Clean up the temporary image file
         if os.path.exists(image_file):
             os.remove(image_file)
 
         return jsonify({"status": "success", "message": "MTF insights update posted."}), 200
 
-    except FileNotFoundError as e:
-        print(f"Error: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
-    except ValueError as e:
-        print(f"Error: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
     except Exception as e:
         print(f"An unexpected error occurred: {e}")
         return jsonify({"status": "error", "message": f"An unexpected error occurred: {str(e)}"}), 500
 
-# Optional: A root endpoint for health check
 @app.route('/', methods=['GET'])
 def home():
     return jsonify({"status": "ok", "message": "Tweet Bot API is running!"}), 200
