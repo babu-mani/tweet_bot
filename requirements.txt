@@ -1,11 +1,7 @@
 Flask
-gunicorn
 tweepy
+requests
 yfinance
 beautifulsoup4
-requests
 Pillow
 python-dotenv
-pandas
-numpy
-matplotlib
