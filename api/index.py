@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 # Author: ChartWizMani
 # Description: Generates and posts financial market updates (Global & MTF) to Twitter.
+# Vercel-Ready: Uses /tmp for storage and headless Matplotlib.
 
 from flask import Flask, jsonify
 import os
 import sys
 import json
-import re
 import requests
 import tweepy
 import yfinance as yf
@@ -32,14 +32,9 @@ yf.set_tz_cache_location("/tmp/yf_tz_cache") # Fix for Vercel Read-Only FS
 app = Flask(__name__)
 
 # --- FONTS CONFIGURATION ---
-# Assumes structure: project_root/fonts/
+# We use the existing Roboto-Bold.ttf for everything to keep it simple
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-FONT_DIR = os.path.join(BASE_DIR, "fonts")
-# Fonts for MTF (Matplotlib)
-FONT_MTF_REG = os.path.join(FONT_DIR, "Inter-Regular.ttf")
-FONT_MTF_BOLD = os.path.join(FONT_DIR, "Inter-Bold.ttf")
-# Font for Global Market (Pillow) - Keeping your original Roboto
-FONT_GLOBAL = os.path.join(FONT_DIR, "Roboto-Bold.ttf")
+FONT_PATH = os.path.join(BASE_DIR, "Roboto-Bold.ttf")
 
 # --- STYLING CONSTANTS (MTF) ---
 COLORS = {
@@ -68,11 +63,9 @@ def get_twitter_api():
 
 def get_pil_font(size):
     """Helper for Pillow fonts (Global Market)"""
-    # Fallback logic if specific font missing
-    path = FONT_GLOBAL if os.path.exists(FONT_GLOBAL) else FONT_MTF_BOLD
-    if not os.path.exists(path):
+    if not os.path.exists(FONT_PATH):
         return ImageFont.load_default()
-    return ImageFont.truetype(path, size)
+    return ImageFont.truetype(FONT_PATH, size)
 
 def fetch_gift_nifty():
     try:
@@ -119,7 +112,7 @@ def create_global_image(data):
     img = Image.new('RGB', (width, height), color=(20, 20, 40))
     draw = ImageDraw.Draw(img)
     
-    # Draw logic...
+    # Draw logic
     draw.text((width/2, 150), "Global Market Update", font=get_pil_font(78), fill=(255,255,255), anchor="mm")
     draw.text((width/2, 230), datetime.now().strftime("%d %b, %Y"), font=get_pil_font(48), fill=(180,180,200), anchor="mm")
 
@@ -143,11 +136,10 @@ def create_global_image(data):
 # PART 2: MTF FUNCTIONS (New & Robust)
 # =========================================
 
-def get_mpl_font_props(is_bold=False):
-    """Helper for Matplotlib fonts"""
-    path = FONT_MTF_BOLD if is_bold else FONT_MTF_REG
+def get_mpl_font_props():
+    """Helper for Matplotlib fonts (Uses Roboto-Bold.ttf)"""
     try:
-        return fm.FontProperties(fname=path) if os.path.exists(path) else fm.FontProperties(weight='bold' if is_bold else 'normal')
+        return fm.FontProperties(fname=FONT_PATH) if os.path.exists(FONT_PATH) else fm.FontProperties()
     except:
         return fm.FontProperties()
 
@@ -222,13 +214,12 @@ def create_mtf_image(data):
     fig = plt.figure(figsize=(16, 9), facecolor=COLORS['bg'])
     ax = fig.add_axes([0,0,1,1]); ax.axis('off')
     
-    # Fonts
-    font_bold = get_mpl_font_props(True)
-    font_reg = get_mpl_font_props(False)
+    # Use existing Roboto font
+    font_main = get_mpl_font_props()
     
     # Header
-    fig.text(0.05, 0.92, "MTF Market Insights", fontproperties=font_bold, fontsize=36, color=COLORS['title'])
-    fig.text(0.05, 0.88, f"Margin Trading Funding Analysis | {data['date']}", fontproperties=font_reg, fontsize=16, color=COLORS['subtitle'])
+    fig.text(0.05, 0.92, "MTF Market Insights", fontproperties=font_main, fontsize=36, color=COLORS['title'])
+    fig.text(0.05, 0.88, f"Margin Trading Funding Analysis | {data['date']}", fontproperties=font_main, fontsize=16, color=COLORS['subtitle'])
     
     # KPI Cards
     kpis = [
@@ -242,12 +233,12 @@ def create_mtf_image(data):
     for i, (title, val, col) in enumerate(kpis):
         x = 0.05 + i*(card_w + gap)
         ax.add_patch(patches.FancyBboxPatch((x, card_y), card_w, card_h, boxstyle="round,pad=0.02", fc=COLORS['card_bg'], ec='none'))
-        fig.text(x + card_w/2, card_y + card_h - 0.04, title, ha='center', fontproperties=font_reg, fontsize=14, color=COLORS['subtitle'])
-        fig.text(x + card_w/2, card_y + 0.05, val, ha='center', fontproperties=font_bold, fontsize=24, color=col)
+        fig.text(x + card_w/2, card_y + card_h - 0.04, title, ha='center', fontproperties=font_main, fontsize=14, color=COLORS['subtitle'])
+        fig.text(x + card_w/2, card_y + 0.05, val, ha='center', fontproperties=font_main, fontsize=24, color=col)
 
     # Tables
     def draw_list(title, items, x_pos, is_vol):
-        fig.text(x_pos, 0.60, title, fontproperties=font_bold, fontsize=18, color=COLORS['accent'])
+        fig.text(x_pos, 0.60, title, fontproperties=font_main, fontsize=18, color=COLORS['accent'])
         y = 0.54
         for idx, (sym, val) in enumerate(items):
             bg = COLORS['card_bg'] if idx % 2 == 0 else COLORS['bg']
@@ -255,15 +246,15 @@ def create_mtf_image(data):
             val_str = f"{val/1e6:.1f}M" if is_vol and val > 1e6 else (f"{val/1e3:.0f}K" if is_vol else f"₹{val:,.1f} Cr")
             col = COLORS['accent'] if is_vol else COLORS['positive']
             
-            fig.text(x_pos+0.02, y+0.01, f"{idx+1}. {sym}", fontproperties=font_reg, fontsize=15, color=COLORS['text'])
-            fig.text(x_pos+0.38, y+0.01, val_str, fontproperties=font_bold, fontsize=15, color=col, ha='right')
+            fig.text(x_pos+0.02, y+0.01, f"{idx+1}. {sym}", fontproperties=font_main, fontsize=15, color=COLORS['text'])
+            fig.text(x_pos+0.38, y+0.01, val_str, fontproperties=font_main, fontsize=15, color=col, ha='right')
             y -= 0.05
 
     draw_list("Top 10 Additions (Value)", data.get('top_val', []), 0.05, False)
     draw_list("Top 10 Volume Buzzers", data.get('top_vol', []), 0.52, True)
 
     # Watermark
-    fig.text(0.98, 0.02, f"@ChartWizMani | Data as of {data['date']}", ha='right', fontproperties=font_reg, fontsize=12, color=COLORS['subtitle'])
+    fig.text(0.98, 0.02, f"@ChartWizMani | Data as of {data['date']}", ha='right', fontproperties=font_main, fontsize=12, color=COLORS['subtitle'])
 
     filename = "/tmp/mtf_insights.png"
     plt.savefig(filename, dpi=100, facecolor=COLORS['bg'])
@@ -332,5 +323,3 @@ def mtf_insights_update():
 @app.route('/')
 def home():
     return "Tweet Bot is Running!"
-
-# No app.run() needed for Vercel
