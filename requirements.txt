@@ -8,3 +8,4 @@ Pillow
 python-dotenv
 pandas
 numpy
+matplotlib
