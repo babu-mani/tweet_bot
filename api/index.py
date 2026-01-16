@@ -1,74 +1,90 @@
 # -*- coding: utf-8 -*-
 # Author: ChartWizMani
-# Description: Speed-Optimized for Vercel 10s Timeout (Lazy Loading)
+# Description: Ultra-Stable Vercel Version with Force-Logging
 
-from flask import Flask, jsonify
+# --- 1. CRITICAL SETUP (Must be first) ---
 import os
 import sys
+
+# Force immediate log flushing (Fixes missing logs)
+sys.stdout.reconfigure(line_buffering=True)
+
+# Set environment variables BEFORE importing heavy libraries
+os.environ['MPLCONFIGDIR'] = '/tmp'
+os.environ['HOME'] = '/tmp'
+
+from flask import Flask, jsonify
 import json
 import requests
 import tweepy
-from datetime import datetime, timedelta
-from dotenv import load_dotenv
 import zipfile
 import io
+from datetime import datetime, timedelta
+from dotenv import load_dotenv
 
-# --- SERVERLESS CONFIG ---
+# --- 2. LAZY LOAD HEAVY LIBS ---
+# We do not import pandas/matplotlib/yfinance at the top level.
+# They are imported inside functions to prevent "Cold Start" timeouts.
+
 load_dotenv()
 app = Flask(__name__)
 
 # --- HELPER: TWITTER AUTH ---
 def get_twitter_api():
-    api_key = os.getenv("TWITTER_API_KEY")
-    api_secret = os.getenv("TWITTER_API_SECRET")
-    access_token = os.getenv("TWITTER_ACCESS_TOKEN")
-    access_token_secret = os.getenv("TWITTER_ACCESS_TOKEN_SECRET")
+    print("🔑 Authenticating Twitter...", flush=True)
+    try:
+        api_key = os.getenv("TWITTER_API_KEY")
+        api_secret = os.getenv("TWITTER_API_SECRET")
+        access_token = os.getenv("TWITTER_ACCESS_TOKEN")
+        access_token_secret = os.getenv("TWITTER_ACCESS_TOKEN_SECRET")
 
-    if not all([api_key, api_secret, access_token, access_token_secret]):
-        print("❌ Missing Twitter API Credentials")
+        if not all([api_key, api_secret, access_token, access_token_secret]):
+            print("❌ Missing Twitter Keys!", flush=True)
+            return None
+
+        auth = tweepy.OAuth1UserHandler(api_key, api_secret, access_token, access_token_secret)
+        return tweepy.API(auth)
+    except Exception as e:
+        print(f"❌ Auth Error: {e}", flush=True)
         return None
 
-    auth = tweepy.OAuth1UserHandler(api_key, api_secret, access_token, access_token_secret)
-    return tweepy.API(auth)
-
 # =========================================
-# PART 1: GLOBAL MARKET (Optimized)
+# ROUTE 1: GLOBAL MARKET
 # =========================================
 @app.route('/global-market-update')
 def global_market_update():
+    print("🚀 Starting Global Market Update...", flush=True)
     try:
-        # --- LAZY IMPORTS (Saves ~2-3s on startup) ---
+        # Lazy Imports
         import yfinance as yf
         from bs4 import BeautifulSoup
         from PIL import Image, ImageDraw, ImageFont 
         
-        # Configure yfinance cache
         yf.set_tz_cache_location("/tmp/yf_tz_cache")
 
-        # --- DATA FETCHING ---
         data = {}
         
-        # 1. GIFT Nifty (Fast Timeout)
+        # 1. GIFT Nifty
         try:
+            print("   Fetching GIFT Nifty...", flush=True)
             url = "https://groww.in/indices/global-indices/sgx-nifty"
-            headers = {'User-Agent': 'Mozilla/5.0'}
-            resp = requests.get(url, headers=headers, timeout=3) # Strict 3s timeout
+            resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=3)
             soup = BeautifulSoup(resp.text, 'html.parser')
             raw = json.loads(soup.find('script', {'id': '__NEXT_DATA__'}).string)
             price = raw['props']['pageProps']['globalIndicesData']['priceData']
             data["GIFTNIFTY"] = (f"{price['value']:,.2f}", f"{price['dayChangePerc']:+.2f}%")
-        except:
-            pass # Skip if slow
+        except Exception as e:
+            print(f"   ⚠️ GIFT Nifty Failed: {e}", flush=True)
 
-        # 2. YFinance (Batch where possible or sequential)
+        # 2. Global Indices
         tickers = {
             "Nikkei 225": "^N225", "Dow Futures": "YM=F",
             "S&P 500": "^GSPC", "Nasdaq": "^IXIC", "Hang Seng": "^HSI"
         }
         
+        print("   Fetching Global Tickers...", flush=True)
         for name, sym in tickers.items():
             try:
-                # Fetch minimal history (2 days)
                 hist = yf.Ticker(sym).history(period="5d")
                 if len(hist) >= 2:
                     curr = hist['Close'].iloc[-1]
@@ -78,11 +94,14 @@ def global_market_update():
             except:
                 continue
 
-        if not data: return jsonify({"status": "error", "message": "No data fetched"}), 500
+        if not data:
+            print("❌ No Global Data Found!", flush=True)
+            return jsonify({"status": "error", "message": "No data fetched"}), 500
 
-        # --- IMAGE GENERATION ---
+        # 3. Image Gen
+        print("   Generating Image...", flush=True)
         BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-        FONT_PATH = os.path.join(BASE_DIR, "fonts", "Roboto-Bold.ttf")
+        FONT_PATH = os.path.join(BASE_DIR, "Roboto-Bold.ttf") # Assumes flat structure
         
         def get_font(size):
             return ImageFont.truetype(FONT_PATH, size) if os.path.exists(FONT_PATH) else ImageFont.load_default()
@@ -108,7 +127,8 @@ def global_market_update():
         filename = "/tmp/global_update.png"
         img.save(filename)
 
-        # --- TWITTER POST ---
+        # 4. Post
+        print("   Posting to Twitter...", flush=True)
         api = get_twitter_api()
         if api:
             txt = [f"Global Market Update – {datetime.now().strftime('%d %b')}\n"]
@@ -117,122 +137,125 @@ def global_market_update():
             txt.append("\n#StockMarket #Nifty #GIFTNIFTY")
             media = api.media_upload(filename)
             api.update_status(status="\n".join(txt), media_ids=[media.media_id])
+            print("✅ Global Update Posted!", flush=True)
 
         return jsonify({"status": "posted"}), 200
 
     except Exception as e:
-        print(f"Global Error: {e}")
+        print(f"❌ CRITICAL GLOBAL ERROR: {e}", flush=True)
         return jsonify({"error": str(e)}), 500
 
 # =========================================
-# PART 2: MTF INSIGHTS (Optimized)
+# ROUTE 2: MTF INSIGHTS
 # =========================================
 @app.route('/mtf-insights-update')
 def mtf_insights_update():
+    print("🚀 Starting MTF Insights...", flush=True)
     try:
-        # --- LAZY IMPORTS (Saves ~3s on startup) ---
+        # Lazy Imports
+        print("   Importing Libs...", flush=True)
         import pandas as pd
         import matplotlib
-        matplotlib.use('Agg') # Headless
+        matplotlib.use('Agg')
         import matplotlib.pyplot as plt
         import matplotlib.font_manager as fm
         import matplotlib.patches as patches
-        
-        # Force cache to /tmp
-        os.environ['MPLCONFIGDIR'] = '/tmp'
 
-        # --- DATA FETCHING (Reduced Loop) ---
+        # Data Fetch
+        print("   Fetching NSE Data...", flush=True)
         session = requests.Session()
         session.headers.update({'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.nseindia.com/'})
         
+        # Prime session
+        try: session.get("https://www.nseindia.com/", timeout=2)
+        except: pass
+
         data = None
-        # REDUCED LOOP: Check only last 3 days to avoid timeout
+        # Loop only 3 days back for speed
         for days_ago in range(3): 
             target_date = datetime.now() - timedelta(days=days_ago)
-            date_url = target_date.strftime("%d%m%y")
-            url = f"https://nsearchives.nseindia.com/content/equities/mrg_trading_{date_url}.zip"
-
+            date_str = target_date.strftime("%d%m%y")
+            url = f"https://nsearchives.nseindia.com/content/equities/mrg_trading_{date_str}.zip"
+            
+            print(f"   Checking: {url}", flush=True)
             try:
-                # STRICT 2s TIMEOUT
-                resp = session.get(url, timeout=2) 
-                if resp.status_code == 404: continue
-                
-                with zipfile.ZipFile(io.BytesIO(resp.content)) as z:
-                    csv_name = [f for f in z.namelist() if f.lower().endswith('.csv')][0]
-                    with z.open(csv_name) as f:
-                        content = f.read()
-                        
-                        # Parse Summary
-                        df_sum = pd.read_csv(io.BytesIO(content), header=None, nrows=20)
-                        def get_val(k):
-                            row = df_sum[df_sum[1].str.contains(k, na=False, case=False)]
-                            return float(str(row.iloc[0,2]).replace(',','').strip())/100 if not row.empty else 0.0
-                        
-                        data = {
-                            'date': target_date.strftime("%d-%b-%Y"),
-                            'added': get_val("Fresh Exposure"),
-                            'liquidated': get_val("Exposure liquidated"),
-                            'industry_book': get_val("Net scripwise outstanding")
-                        }
-                        data['net'] = data['added'] - data['liquidated']
-
-                        # Parse Top 10s
-                        csv_lines = content.decode('utf-8', errors='ignore').splitlines()
-                        header_idx = next((i for i, l in enumerate(csv_lines) if "Symbol" in l and "Qty" in l), -1)
-                        data['top_val'], data['top_vol'] = [], []
-                        
-                        if header_idx != -1:
-                            df = pd.read_csv(io.BytesIO(content), skiprows=header_idx)
-                            df.columns = [c.strip() for c in df.columns]
-                            col_sym = next((c for c in df.columns if "Symbol" in c), "Symbol")
-                            col_amt = next((c for c in df.columns if "Amt" in c and "Fin" in c), None)
-                            col_qty = next((c for c in df.columns if "Qty" in c and "Fin" in c), None)
+                resp = session.get(url, timeout=3)
+                if resp.status_code == 200:
+                    print("   ✅ Found Data! Processing...", flush=True)
+                    with zipfile.ZipFile(io.BytesIO(resp.content)) as z:
+                        csv_name = [f for f in z.namelist() if f.lower().endswith('.csv')][0]
+                        with z.open(csv_name) as f:
+                            content = f.read()
                             
-                            if col_amt:
-                                for _, r in df.sort_values(by=col_amt, ascending=False).head(10).iterrows():
-                                    data['top_val'].append((r[col_sym], r[col_amt]/100))
-                            if col_qty:
-                                for _, r in df.sort_values(by=col_qty, ascending=False).head(10).iterrows():
-                                    data['top_vol'].append((r[col_sym], r[col_qty]))
-                break # Found data, stop loop
-            except:
+                            # Summary
+                            df_sum = pd.read_csv(io.BytesIO(content), header=None, nrows=20)
+                            def get_val(k):
+                                row = df_sum[df_sum[1].str.contains(k, na=False, case=False)]
+                                return float(str(row.iloc[0,2]).replace(',','').strip())/100 if not row.empty else 0.0
+                            
+                            data = {
+                                'date': target_date.strftime("%d-%b-%Y"),
+                                'added': get_val("Fresh Exposure"),
+                                'liquidated': get_val("Exposure liquidated"),
+                                'industry_book': get_val("Net scripwise outstanding")
+                            }
+                            data['net'] = data['added'] - data['liquidated']
+
+                            # Details
+                            csv_lines = content.decode('utf-8', errors='ignore').splitlines()
+                            header_idx = next((i for i, l in enumerate(csv_lines) if "Symbol" in l and "Qty" in l), -1)
+                            
+                            data['top_val'], data['top_vol'] = [], []
+                            if header_idx != -1:
+                                df = pd.read_csv(io.BytesIO(content), skiprows=header_idx)
+                                df.columns = [c.strip() for c in df.columns]
+                                col_amt = next((c for c in df.columns if "Amt" in c and "Fin" in c), None)
+                                col_qty = next((c for c in df.columns if "Qty" in c and "Fin" in c), None)
+                                col_sym = next((c for c in df.columns if "Symbol" in c), "Symbol")
+                                
+                                if col_amt:
+                                    for _, r in df.sort_values(by=col_amt, ascending=False).head(10).iterrows():
+                                        data['top_val'].append((r[col_sym], r[col_amt]/100))
+                                if col_qty:
+                                    for _, r in df.sort_values(by=col_qty, ascending=False).head(10).iterrows():
+                                        data['top_vol'].append((r[col_sym], r[col_qty]))
+                    break # Success
+            except Exception as e:
+                print(f"   ⚠️ Fetch/Parse Error: {e}", flush=True)
                 continue
         
-        if not data: return jsonify({"error": "No MTF data found in last 3 days"}), 500
+        if not data:
+            print("❌ No MTF Data Found (Last 3 Days)", flush=True)
+            return jsonify({"error": "No data found"}), 500
 
-        # --- IMAGE GENERATION (Matplotlib) ---
+        # Image Gen
+        print("   Generating Chart...", flush=True)
         BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-        FONT_MTF_BOLD = os.path.join(BASE_DIR, "fonts", "Roboto-Bold.ttf")
+        FONT_PATH = os.path.join(BASE_DIR, "Roboto-Bold.ttf")
         
-        def get_font():
-            return fm.FontProperties(fname=FONT_MTF_BOLD) if os.path.exists(FONT_MTF_BOLD) else fm.FontProperties()
+        def get_mpl_font():
+            return fm.FontProperties(fname=FONT_PATH) if os.path.exists(FONT_PATH) else fm.FontProperties()
 
         COLORS = {'bg': '#111827', 'card_bg': '#1F2937', 'text': '#E5E7EB', 'accent': '#3B82F6', 'pos': '#10B981', 'neg': '#F43F5E'}
-        
         fig = plt.figure(figsize=(16, 9), facecolor=COLORS['bg'])
         ax = fig.add_axes([0,0,1,1]); ax.axis('off')
-        font_main = get_font()
+        font_main = get_mpl_font()
         
         fig.text(0.05, 0.92, "MTF Market Insights", fontproperties=font_main, fontsize=36, color='#F9FAFB')
         fig.text(0.05, 0.88, f"Analysis | {data['date']}", fontproperties=font_main, fontsize=16, color='#9CA3AF')
 
-        # KPI Cards
-        kpis = [
-            ("Added", f"₹{data['added']:,.0f} Cr", COLORS['pos']),
-            ("Liquidated", f"₹{data['liquidated']:,.0f} Cr", COLORS['neg']),
-            ("Net Flow", f"{'+' if data['net']>=0 else ''}₹{data['net']:,.0f} Cr", COLORS['pos'] if data['net']>=0 else COLORS['neg']),
-            ("Total Book", f"₹{data['industry_book']:,.0f} Cr", COLORS['accent'])
-        ]
+        kpis = [("Added", f"₹{data['added']:,.0f} Cr", COLORS['pos']), ("Liquidated", f"₹{data['liquidated']:,.0f} Cr", COLORS['neg']),
+                ("Net Flow", f"{'+' if data['net']>=0 else ''}₹{data['net']:,.0f} Cr", COLORS['pos'] if data['net']>=0 else COLORS['neg']),
+                ("Total Book", f"₹{data['industry_book']:,.0f} Cr", COLORS['accent'])]
         
         for i, (t, v, c) in enumerate(kpis):
             x = 0.05 + i*0.23
             ax.add_patch(patches.FancyBboxPatch((x, 0.68), 0.20, 0.15, boxstyle="round,pad=0.02", fc=COLORS['card_bg'], ec='none'))
-            fig.text(x + 0.1, 0.79, t, ha='center', fontproperties=font_main, fontsize=14, color='#9CA3AF')
-            fig.text(x + 0.1, 0.73, v, ha='center', fontproperties=font_main, fontsize=24, color=c)
+            fig.text(x+0.1, 0.79, t, ha='center', fontproperties=font_main, fontsize=14, color='#9CA3AF')
+            fig.text(x+0.1, 0.73, v, ha='center', fontproperties=font_main, fontsize=24, color=c)
 
-        # Tables
-        def draw_list(title, items, x_pos, is_vol):
-            fig.text(x_pos, 0.60, title, fontproperties=font_main, fontsize=18, color=COLORS['accent'])
+        def draw_list(t, items, x_pos, is_vol):
+            fig.text(x_pos, 0.60, t, fontproperties=font_main, fontsize=18, color=COLORS['accent'])
             y = 0.54
             for idx, (sym, val) in enumerate(items):
                 ax.add_patch(patches.Rectangle((x_pos, y-0.01), 0.40, 0.045, fc=(COLORS['card_bg'] if idx%2==0 else COLORS['bg'])))
@@ -242,16 +265,17 @@ def mtf_insights_update():
                 fig.text(x_pos+0.38, y+0.01, val_str, fontproperties=font_main, fontsize=15, color=col, ha='right')
                 y -= 0.05
 
-        draw_list("Top 10 Additions (Value)", data.get('top_val', []), 0.05, False)
-        draw_list("Top 10 Volume Buzzers", data.get('top_vol', []), 0.52, True)
-
+        draw_list("Top 10 Additions (Value)", data['top_val'], 0.05, False)
+        draw_list("Top 10 Volume Buzzers", data['top_vol'], 0.52, True)
+        
         fig.text(0.98, 0.02, f"@ChartWizMani | {data['date']}", ha='right', fontproperties=font_main, fontsize=12, color='#9CA3AF')
         
         filename = "/tmp/mtf_insights.png"
         plt.savefig(filename, dpi=100, facecolor=COLORS['bg'])
         plt.close()
 
-        # --- TWITTER POST ---
+        # Post
+        print("   Posting to Twitter...", flush=True)
         api = get_twitter_api()
         if api:
             sign = "+" if data['net'] >= 0 else ""
@@ -259,13 +283,17 @@ def mtf_insights_update():
                    f"Net: {sign}₹{data['net']:,.0f} Cr\nTotal Book: ₹{data['industry_book']:,.0f} Cr\n\n#MTF #Nifty")
             media = api.media_upload(filename)
             api.update_status(status=txt, media_ids=[media.media_id])
+            print("✅ MTF Tweet Posted!", flush=True)
 
         return jsonify({"status": "posted", "date": data['date']}), 200
 
     except Exception as e:
-        print(f"MTF Error: {e}")
+        print(f"❌ CRITICAL MTF ERROR: {e}", flush=True)
+        # Import traceback to see exactly where it crashed
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 @app.route('/')
 def home():
-    return "Tweet Bot Optimized Running!"
+    return "Tweet Bot is Stable & Running!"
