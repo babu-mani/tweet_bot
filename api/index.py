@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
 # Author: ChartWizMani
-# Date: 03-Dec-2025 (Updated for Robust Data Fetching)
-# Description: Generates and posts financial market updates to Twitter.
+# Description: Generates and posts financial market updates (Global & MTF) to Twitter.
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify
 import os
 import sys
 import json
@@ -11,349 +10,327 @@ import re
 import requests
 import tweepy
 import yfinance as yf
-from datetime import datetime
+from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont # For Global Market Image
 from dotenv import load_dotenv
+import zipfile
+import io
+import pandas as pd
 
-# --- FIX 1: Set yfinance cache to a writable folder to stop "Read-only" errors ---
-yf.set_tz_cache_location("/tmp/yf_tz_cache")
+# --- MATPLOTLIB SETUP (Must be before pyplot import) ---
+import matplotlib
+matplotlib.use('Agg') # Force headless mode for Vercel
+import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
+import matplotlib.patches as patches
+
+# --- SERVERLESS CONFIG ---
+load_dotenv()
+yf.set_tz_cache_location("/tmp/yf_tz_cache") # Fix for Vercel Read-Only FS
 
 app = Flask(__name__)
 
-# --- Configuration ---
-FONT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Roboto-Bold.ttf")
+# --- FONTS CONFIGURATION ---
+# Assumes structure: project_root/fonts/
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+FONT_DIR = os.path.join(BASE_DIR, "fonts")
+# Fonts for MTF (Matplotlib)
+FONT_MTF_REG = os.path.join(FONT_DIR, "Inter-Regular.ttf")
+FONT_MTF_BOLD = os.path.join(FONT_DIR, "Inter-Bold.ttf")
+# Font for Global Market (Pillow) - Keeping your original Roboto
+FONT_GLOBAL = os.path.join(FONT_DIR, "Roboto-Bold.ttf")
 
-WIDTH, HEIGHT = 1080, 1080
-load_dotenv() 
+# --- STYLING CONSTANTS (MTF) ---
+COLORS = {
+    'bg': '#111827', 'card_bg': '#1F2937', 'title': '#F9FAFB',
+    'subtitle': '#9CA3AF', 'text': '#E5E7EB', 'accent': '#3B82F6',
+    'positive': '#10B981', 'negative': '#F43F5E', 'bright_text': '#F3F4F6'
+}
 
-# --- Font & Drawing Utilities ---
-def get_font(size: int):
-    if not os.path.exists(FONT_PATH):
-        print(f"FATAL: Font file not found at {FONT_PATH}.")
-        raise FileNotFoundError(f"Font file not found at {FONT_PATH}.")
-    return ImageFont.truetype(FONT_PATH, size)
-
-def draw_text(draw, position, text, font, fill, anchor="mm"):
-    draw.text(position, text, font=font, fill=fill, anchor=anchor)
-
-# --- Data Fetching (with Safe-Fail Logic) ---
-def fetch_gift_nifty():
-    try:
-        print("Fetching GIFT NIFTY data...")
-        url = "https://groww.in/indices/global-indices/sgx-nifty"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'}
-        response = requests.get(url, headers=headers, timeout=20)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, 'html.parser')
-        data = json.loads(soup.find('script', {'id': '__NEXT_DATA__'}).string)
-        price_data = data['props']['pageProps']['globalIndicesData']['priceData']
-        return f"{price_data['value']:,.2f}", f"{price_data['dayChangePerc']:+.2f}%"
-    except Exception as e:
-        print(f"ERROR: GIFT NIFTY fetch failed ({e}).")
-        return None, None
-
-def get_yfinance_data(ticker_symbol):
-    """
-    FIX 2: Improved logic. Fetches 1 month of data and picks the last 2 valid points.
-    This handles weekends, holidays, and API gaps automatically.
-    """
-    try:
-        # Fetch 1 month. This ensures we have data even if there are holidays/gaps.
-        ticker = yf.Ticker(ticker_symbol)
-        hist = ticker.history(period="1mo")
-
-        # Drop any empty rows (days where API returned null)
-        hist = hist.dropna()
-
-        # Check if we have at least 2 data points total in the last month
-        if len(hist) < 2:
-            print(f"ERROR: Failed to get at least 2 historical data points for {ticker_symbol}.")
-            return None, None
-
-        # .iloc[-1] is the LATEST available price (Today)
-        # .iloc[-2] is the PREVIOUS available price (Yesterday or last trading day)
-        current_close = hist['Close'].iloc[-1]
-        previous_close = hist['Close'].iloc[-2]
-
-        change = ((current_close - previous_close) / previous_close) * 100
-        return f"{current_close:,.2f}", f"{change:+.2f}%"
-
-    except Exception as e:
-        print(f"ERROR: yfinance fetch for {ticker_symbol} failed ({e}).")
-        return None, None
-
-def fetch_global_market_data():
-    """Fetches all global market data. Skips failed tickers instead of crashing."""
-    print("Fetching Global Market data...")
-    data = {}
-    
-    # NOTE: I recommend swapping YM=F for ^DJI if problems persist, 
-    # but the new logic below should handle YM=F better now.
-    tickers = {
-        "Nikkei 225": "^N225", "Dow Jones Futures": "YM=F",
-        "S&P 500": "^GSPC", "Nasdaq": "^IXIC", "Hang Seng": "^HSI"
-    }
-    
-    gn_val, gn_chg = fetch_gift_nifty()
-    # If GIFT Nifty fails, we can still post the others, or choose to fail. 
-    # Current logic: continue even if GIFT Nifty fails (optional).
-    if gn_val:
-        data["GIFTNIFTY"] = (gn_val, gn_chg)
-        print("✓ GIFTNIFTY data fetched.")
-    else:
-        print("⚠️ GIFTNIFTY failed, skipping.")
-
-    for name, symbol in tickers.items():
-        val, chg = get_yfinance_data(symbol)
-        
-        # FIX 3: If one ticker fails, SKIP it. Do not return None.
-        if val is None: 
-            print(f"⚠️ Skipping {name} ({symbol}) due to fetch failure.")
-            continue 
-            
-        data[name] = (val, chg)
-        print(f"✓ {name} data fetched.")
-        
-    print("✓ Global data fetch process completed.")
-    return data
-
-def fetch_mtf_data():
-    """Fetches MTF Insights data. Returns None on failure."""
-    print("Fetching MTF Insights data...")
-    try:
-        url = "https://scanx.trade/insight/mtf-insight"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'}
-        response = requests.get(url, headers=headers, timeout=15)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, 'html.parser')
-        page_text = soup.get_text()
-
-        date_match = re.search(r'as on (\w{3} \d{1,2}, \d{4})', page_text)
-        report_date = date_match.group(1) if date_match else "Date not found"
-
-        insights = {'date': report_date}
-
-        fixed_patterns = {
-            "Positions Added": r'Positions Added:\s*\+?₹\s*([\d,]+\.?\d*)\s*Cr',
-            "Positions Liquidated": r'Positions Liquidated:\s*(?P<sign>[+\-]?)\s*₹\s*(?P<value>[\d,]+\.?\d*)\s*Cr',
-            "Industry MTF Book": r'Industry MTF Book:\s*₹\s*([\d,]+\.?\d*)\s*Cr'
-        }
-
-        net_book_pattern = r'(Net Book (?:Added|Liquidated)):\s*(?P<sign>[+\-]?)\s*₹\s*(?P<value>[\d,]+\.?\d*)\s*Cr'
-        net_book_match = re.search(net_book_pattern, page_text)
-
-        if net_book_match:
-            net_book_label = net_book_match.group(1)
-            captured_value_with_sign = f"{net_book_match.group('sign')}{net_book_match.group('value')}"
-            insights[net_book_label] = f"₹{captured_value_with_sign} Cr"
-            print(f"✓ '{net_book_label}' data fetched dynamically.")
-        else:
-            start_idx = page_text.find('Net Book')
-            end_idx = page_text.find('Cr', start_idx)
-            context = page_text[start_idx:end_idx+30] if start_idx != -1 and end_idx != -1 else "N/A"
-            print(f"ERROR: Could not find dynamic 'Net Book' data. Page text around issue: {context}")
-            return None 
-
-        for key, pattern in fixed_patterns.items():
-            match = re.search(pattern, page_text)
-            if not match:
-                print(f"ERROR: Could not find MTF data for '{key}'.")
-                return None
-            
-            if key == "Positions Liquidated" and 'sign' in match.groupdict():
-                captured_value_with_sign = f"{match.group('sign')}{match.group('value')}"
-                insights[key] = f"₹{captured_value_with_sign} Cr"
-            else:
-                insights[key] = f"₹{match.group(1)} Cr"
-            print(f"✓ '{key}' data fetched.")
-
-        print("✓ MTF data fetched.")
-        return insights 
-
-    except Exception as e:
-        print(f"ERROR: MTF fetch failed ({e}).")
-        return None
-
-# --- Image Generation ---
-def _draw_watermark(draw, width, height):
-    try:
-        font = get_font(28)
-    except FileNotFoundError as e:
-        print(f"Warning: Watermark font not found. Skipping watermark. Error: {e}")
-        return 
-
-    color = (180, 180, 200)
-    date_str = datetime.now().strftime('%d-%b-%Y')
-    text = f"@ChartWizMani | Data as of {date_str} | For informational & educational use only"
-    draw_text(draw, (width / 2, height - 50), text, font, color)
-
-def create_market_update_image(data):
-    img = Image.new('RGB', (WIDTH, HEIGHT), color=(20, 20, 40))
-    draw = ImageDraw.Draw(img)
-    draw_text(draw, (WIDTH/2, 150), "Global Market Update", get_font(78), (255,255,255))
-    draw_text(draw, (WIDTH/2, 230), datetime.now().strftime("%d %b, %Y"), get_font(48), (180,180,200))
-
-    y_pos = 360
-    data_font = get_font(42)
-    # Even if data is missing for a key, .get() will return "N/A" so it won't crash
-    for key in ["GIFTNIFTY", "Nikkei 225", "Dow Jones Futures", "S&P 500", "Nasdaq", "Hang Seng"]:
-        value, change = data.get(key, ("N/A", "+0.00%"))
-        color = (255, 80, 80) if change.startswith('-') else (80, 255, 80)
-        draw_text(draw, (100, y_pos), f"{key}:", data_font, (255,255,255), "ls")
-        draw_text(draw, (750, y_pos), value, data_font, (255,255,255), "rs")
-        draw_text(draw, (WIDTH - 100, y_pos), change, data_font, color, "rs")
-        y_pos += 100
-
-    _draw_watermark(draw, WIDTH, HEIGHT)
-    filename = "/tmp/global_market_update.png" 
-    img.save(filename)
-    return filename
-
-def create_mtf_insights_image(data):
-    img = Image.new('RGB', (WIDTH, HEIGHT), color=(40, 20, 20))
-    draw = ImageDraw.Draw(img)
-    draw_text(draw, (WIDTH/2, 150), "MTF Insights", get_font(78), (255,255,255))
-    draw_text(draw, (WIDTH/2, 230), f"(as on {data.get('date')})", get_font(48), (200,180,200))
-
-    y_pos = 380
-    ordered_keys_image = [
-        "Positions Added",
-        "Positions Liquidated",
-        "Industry MTF Book"
-    ]
-
-    net_book_dynamic_key_image = None
-    for k in data.keys():
-        if k.startswith("Net Book"):
-            net_book_dynamic_key_image = k
-            break
-    
-    if net_book_dynamic_key_image:
-        ordered_keys_image.insert(2, net_book_dynamic_key_image)
-
-    for key in ordered_keys_image:
-        draw_text(draw, (80, y_pos), f"- {key}:", get_font(46), (255,255,255), "ls")
-        draw_text(draw, (WIDTH - 80, y_pos), data.get(key, "N/A"), get_font(46), (255,223,186), "rs")
-        y_pos += 120
-
-    _draw_watermark(draw, WIDTH, HEIGHT)
-    filename = "/tmp/mtf_insights.png" 
-    img.save(filename)
-    return filename
-
-# --- Text & Twitter ---
-def build_tweet_text(data, job_type):
-    if job_type == 'global':
-        lines = [f"Global Market Update – {datetime.now().strftime('%d %b, %Y')}\n"]
-        for key in ["GIFTNIFTY", "Nikkei 225", "Dow Jones Futures", "S&P 500", "Nasdaq", "Hang Seng"]:
-            value, change = data.get(key, ("N/A", "+0.00%"))
-            lines.append(f"{key}: {value} ({change})")
-        lines.append("\n#GIFTNIFTY #Nifty #DowJones #Nasdaq #Nikkei #HangSeng")
-    else: 
-        lines = [f"MTF Insights (as on {data.get('date')})\n"]
-        
-        ordered_keys = [
-            "Positions Added",
-            "Positions Liquidated",
-            "Industry MTF Book"
-        ]
-
-        net_book_dynamic_key = None
-        for k in data.keys():
-            if k.startswith("Net Book"):
-                net_book_dynamic_key = k
-                break
-        
-        if net_book_dynamic_key:
-            ordered_keys.insert(2, net_book_dynamic_key)
-
-        for key in ordered_keys:
-            lines.append(f"- {key}: {data.get(key, 'N/A')}")
-        lines.append("\n#MTF #nifty #GIFTNIFTY #banknifty")
-    return "\n".join(lines)
-
-def post_to_twitter(text, image_path):
+# --- HELPER: TWITTER AUTH ---
+def get_twitter_api():
     api_key = os.getenv("TWITTER_API_KEY")
     api_secret = os.getenv("TWITTER_API_SECRET")
     access_token = os.getenv("TWITTER_ACCESS_TOKEN")
     access_token_secret = os.getenv("TWITTER_ACCESS_TOKEN_SECRET")
 
     if not all([api_key, api_secret, access_token, access_token_secret]):
-        print("FATAL: Twitter API credentials not found in environment. Cannot post.")
-        raise ValueError("Twitter API credentials missing.")
+        print("❌ Missing Twitter API Credentials")
+        return None
 
+    auth = tweepy.OAuth1UserHandler(api_key, api_secret, access_token, access_token_secret)
+    return tweepy.API(auth)
+
+# =========================================
+# PART 1: GLOBAL MARKET FUNCTIONS (Existing)
+# =========================================
+
+def get_pil_font(size):
+    """Helper for Pillow fonts (Global Market)"""
+    # Fallback logic if specific font missing
+    path = FONT_GLOBAL if os.path.exists(FONT_GLOBAL) else FONT_MTF_BOLD
+    if not os.path.exists(path):
+        return ImageFont.load_default()
+    return ImageFont.truetype(path, size)
+
+def fetch_gift_nifty():
     try:
-        print("Authenticating with Twitter...")
-        client = tweepy.Client(
-            consumer_key=api_key, consumer_secret=api_secret,
-            access_token=access_token, access_token_secret=access_token_secret
-        )
-        auth = tweepy.OAuth1UserHandler(api_key, api_secret, access_token, access_token_secret)
-        api_v1 = tweepy.API(auth)
-
-        print(f"Uploading media: {image_path}...")
-        media = api_v1.media_upload(filename=image_path)
-
-        print("Posting tweet...")
-        client.create_tweet(text=text, media_ids=[media.media_id_string])
-        print("✓ Tweet posted successfully!")
-        return True
+        url = "https://groww.in/indices/global-indices/sgx-nifty"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        data = json.loads(soup.find('script', {'id': '__NEXT_DATA__'}).string)
+        price_data = data['props']['pageProps']['globalIndicesData']['priceData']
+        return f"{price_data['value']:,.2f}", f"{price_data['dayChangePerc']:+.2f}%"
     except Exception as e:
-        print(f"FATAL: Error posting to Twitter: {e}")
-        raise 
+        print(f"GIFT NIFTY Error: {e}")
+        return None, None
 
-@app.route('/global-market-update', methods=['GET'])
+def get_yfinance_data(ticker_symbol):
+    try:
+        ticker = yf.Ticker(ticker_symbol)
+        hist = ticker.history(period="1mo")
+        hist = hist.dropna()
+        if len(hist) < 2: return None, None
+        curr = hist['Close'].iloc[-1]
+        prev = hist['Close'].iloc[-2]
+        chg = ((curr - prev) / prev) * 100
+        return f"{curr:,.2f}", f"{chg:+.2f}%"
+    except:
+        return None, None
+
+def fetch_global_data():
+    data = {}
+    gn_val, gn_chg = fetch_gift_nifty()
+    if gn_val: data["GIFTNIFTY"] = (gn_val, gn_chg)
+    
+    tickers = {
+        "Nikkei 225": "^N225", "Dow Futures": "YM=F",
+        "S&P 500": "^GSPC", "Nasdaq": "^IXIC", "Hang Seng": "^HSI"
+    }
+    for name, sym in tickers.items():
+        val, chg = get_yfinance_data(sym)
+        if val: data[name] = (val, chg)
+    return data
+
+def create_global_image(data):
+    width, height = 1080, 1080
+    img = Image.new('RGB', (width, height), color=(20, 20, 40))
+    draw = ImageDraw.Draw(img)
+    
+    # Draw logic...
+    draw.text((width/2, 150), "Global Market Update", font=get_pil_font(78), fill=(255,255,255), anchor="mm")
+    draw.text((width/2, 230), datetime.now().strftime("%d %b, %Y"), font=get_pil_font(48), fill=(180,180,200), anchor="mm")
+
+    y_pos = 360
+    for key in ["GIFTNIFTY", "Nikkei 225", "Dow Futures", "S&P 500", "Nasdaq", "Hang Seng"]:
+        val, chg = data.get(key, ("N/A", "+0.00%"))
+        col = (255, 80, 80) if chg.startswith('-') else (80, 255, 80)
+        draw.text((100, y_pos), f"{key}:", font=get_pil_font(42), fill=(255,255,255), anchor="lm")
+        draw.text((750, y_pos), val, font=get_pil_font(42), fill=(255,255,255), anchor="rm")
+        draw.text((width-100, y_pos), chg, font=get_pil_font(42), fill=col, anchor="rm")
+        y_pos += 100
+
+    # Watermark
+    draw.text((width/2, height-50), "@ChartWizMani | Data as of " + datetime.now().strftime('%d-%b-%Y'), font=get_pil_font(28), fill=(180,180,200), anchor="mm")
+    
+    filename = "/tmp/global_update.png"
+    img.save(filename)
+    return filename
+
+# =========================================
+# PART 2: MTF FUNCTIONS (New & Robust)
+# =========================================
+
+def get_mpl_font_props(is_bold=False):
+    """Helper for Matplotlib fonts"""
+    path = FONT_MTF_BOLD if is_bold else FONT_MTF_REG
+    try:
+        return fm.FontProperties(fname=path) if os.path.exists(path) else fm.FontProperties(weight='bold' if is_bold else 'normal')
+    except:
+        return fm.FontProperties()
+
+def fetch_mtf_robust():
+    """Loops back 7 days to find the latest valid NSE MTF report"""
+    session = requests.Session()
+    session.headers.update({'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.nseindia.com/'})
+    
+    # Prime session
+    try: session.get("https://www.nseindia.com/", timeout=3)
+    except: pass
+
+    for days_ago in range(7):
+        target_date = datetime.now() - timedelta(days=days_ago)
+        date_url = target_date.strftime("%d%m%y")
+        date_display = target_date.strftime("%d-%b-%Y")
+        url = f"https://nsearchives.nseindia.com/content/equities/mrg_trading_{date_url}.zip"
+
+        try:
+            print(f"Checking MTF for {date_display}...")
+            resp = session.get(url, timeout=10)
+            if resp.status_code == 404: continue
+            
+            with zipfile.ZipFile(io.BytesIO(resp.content)) as z:
+                csv_name = [f for f in z.namelist() if f.lower().endswith('.csv')][0]
+                with z.open(csv_name) as f:
+                    content = f.read()
+                    
+                    # 1. Parse Summary
+                    df_sum = pd.read_csv(io.BytesIO(content), header=None, nrows=20)
+                    def get_val(k):
+                        row = df_sum[df_sum[1].str.contains(k, na=False, case=False)]
+                        return float(str(row.iloc[0,2]).replace(',','').strip())/100 if not row.empty else 0.0
+                    
+                    data = {
+                        'date': date_display,
+                        'added': get_val("Fresh Exposure"),
+                        'liquidated': get_val("Exposure liquidated"),
+                        'industry_book': get_val("Net scripwise outstanding")
+                    }
+                    data['net'] = data['added'] - data['liquidated']
+
+                    # 2. Parse Top 10s
+                    csv_lines = content.decode('utf-8', errors='ignore').splitlines()
+                    header_idx = next((i for i, l in enumerate(csv_lines) if "Symbol" in l and "Qty" in l), -1)
+                    
+                    data['top_val'], data['top_vol'] = [], []
+                    if header_idx != -1:
+                        df = pd.read_csv(io.BytesIO(content), skiprows=header_idx)
+                        df.columns = [c.strip() for c in df.columns]
+                        # Robust column finding
+                        col_sym = next((c for c in df.columns if "Symbol" in c), "Symbol")
+                        col_amt = next((c for c in df.columns if "Amt" in c and "Fin" in c), None)
+                        col_qty = next((c for c in df.columns if "Qty" in c and "Fin" in c), None)
+                        
+                        if col_amt:
+                            for _, r in df.sort_values(by=col_amt, ascending=False).head(10).iterrows():
+                                data['top_val'].append((r[col_sym], r[col_amt]/100))
+                        if col_qty:
+                            for _, r in df.sort_values(by=col_qty, ascending=False).head(10).iterrows():
+                                data['top_vol'].append((r[col_sym], r[col_qty]))
+            
+            return data # Success
+        except Exception as e:
+            print(f"Error parsing {date_display}: {e}")
+            continue
+            
+    return None
+
+def create_mtf_image(data):
+    # Setup
+    fig = plt.figure(figsize=(16, 9), facecolor=COLORS['bg'])
+    ax = fig.add_axes([0,0,1,1]); ax.axis('off')
+    
+    # Fonts
+    font_bold = get_mpl_font_props(True)
+    font_reg = get_mpl_font_props(False)
+    
+    # Header
+    fig.text(0.05, 0.92, "MTF Market Insights", fontproperties=font_bold, fontsize=36, color=COLORS['title'])
+    fig.text(0.05, 0.88, f"Margin Trading Funding Analysis | {data['date']}", fontproperties=font_reg, fontsize=16, color=COLORS['subtitle'])
+    
+    # KPI Cards
+    kpis = [
+        ("Positions Added", f"₹{data['added']:,.0f} Cr", COLORS['positive']),
+        ("Positions Liquidated", f"₹{data['liquidated']:,.0f} Cr", COLORS['negative']),
+        ("Net Book Added", f"{'+' if data['net']>=0 else ''}₹{data['net']:,.0f} Cr", COLORS['positive'] if data['net']>=0 else COLORS['negative']),
+        ("Total Industry Book", f"₹{data['industry_book']:,.0f} Cr", COLORS['accent'])
+    ]
+    
+    card_y, card_w, card_h, gap = 0.68, 0.20, 0.15, 0.03
+    for i, (title, val, col) in enumerate(kpis):
+        x = 0.05 + i*(card_w + gap)
+        ax.add_patch(patches.FancyBboxPatch((x, card_y), card_w, card_h, boxstyle="round,pad=0.02", fc=COLORS['card_bg'], ec='none'))
+        fig.text(x + card_w/2, card_y + card_h - 0.04, title, ha='center', fontproperties=font_reg, fontsize=14, color=COLORS['subtitle'])
+        fig.text(x + card_w/2, card_y + 0.05, val, ha='center', fontproperties=font_bold, fontsize=24, color=col)
+
+    # Tables
+    def draw_list(title, items, x_pos, is_vol):
+        fig.text(x_pos, 0.60, title, fontproperties=font_bold, fontsize=18, color=COLORS['accent'])
+        y = 0.54
+        for idx, (sym, val) in enumerate(items):
+            bg = COLORS['card_bg'] if idx % 2 == 0 else COLORS['bg']
+            ax.add_patch(patches.Rectangle((x_pos, y-0.01), 0.40, 0.045, fc=bg))
+            val_str = f"{val/1e6:.1f}M" if is_vol and val > 1e6 else (f"{val/1e3:.0f}K" if is_vol else f"₹{val:,.1f} Cr")
+            col = COLORS['accent'] if is_vol else COLORS['positive']
+            
+            fig.text(x_pos+0.02, y+0.01, f"{idx+1}. {sym}", fontproperties=font_reg, fontsize=15, color=COLORS['text'])
+            fig.text(x_pos+0.38, y+0.01, val_str, fontproperties=font_bold, fontsize=15, color=col, ha='right')
+            y -= 0.05
+
+    draw_list("Top 10 Additions (Value)", data.get('top_val', []), 0.05, False)
+    draw_list("Top 10 Volume Buzzers", data.get('top_vol', []), 0.52, True)
+
+    # Watermark
+    fig.text(0.98, 0.02, f"@ChartWizMani | Data as of {data['date']}", ha='right', fontproperties=font_reg, fontsize=12, color=COLORS['subtitle'])
+
+    filename = "/tmp/mtf_insights.png"
+    plt.savefig(filename, dpi=100, facecolor=COLORS['bg'])
+    plt.close()
+    return filename
+
+# =========================================
+# ROUTES
+# =========================================
+
+@app.route('/global-market-update')
 def global_market_update():
     try:
-        print("Received request for Global Market Update.")
+        data = fetch_global_data()
+        if not data: return jsonify({"status": "error"}), 500
         
-        # We allow data to be partial now. It returns a dict even if some keys are missing.
-        data = fetch_global_market_data()
-
-        # Only crash if data is totally empty (meaning everything failed)
-        if not data:
-            print("Failed to fetch global market data.")
-            return jsonify({"status": "error", "message": "Could not fetch any global market data."}), 500
-
-        image_file = create_market_update_image(data)
-        tweet_text = build_tweet_text(data, 'global')
-
-        post_to_twitter(tweet_text, image_file)
-
-        if os.path.exists(image_file):
-            os.remove(image_file)
-
-        return jsonify({"status": "success", "message": "Global market update posted."}), 200
-
+        img_path = create_global_image(data)
+        
+        # Build Tweet
+        txt = [f"Global Market Update – {datetime.now().strftime('%d %b')}\n"]
+        for k in ["GIFTNIFTY", "Nikkei 225", "Dow Futures", "S&P 500", "Nasdaq"]:
+            v, c = data.get(k, ("N/A", "0%"))
+            txt.append(f"{k}: {v} ({c})")
+        txt.append("\n#StockMarket #Nifty #GIFTNIFTY")
+        
+        # Post
+        api = get_twitter_api()
+        if api:
+            media = api.media_upload(img_path)
+            api.update_status(status="\n".join(txt), media_ids=[media.media_id])
+            
+        return jsonify({"status": "posted"}), 200
     except Exception as e:
-        print(f"An unexpected error occurred: {e}")
-        return jsonify({"status": "error", "message": f"An unexpected error occurred: {str(e)}"}), 500
+        return jsonify({"error": str(e)}), 500
 
-@app.route('/mtf-insights-update', methods=['GET'])
+@app.route('/mtf-insights-update')
 def mtf_insights_update():
     try:
-        print("Received request for MTF Insights Update.")
-        data = fetch_mtf_data()
-
-        if data is None:
-            print("Failed to fetch MTF insights data.")
-            return jsonify({"status": "error", "message": "Could not fetch live MTF insights data."}), 500
-
-        image_file = create_mtf_insights_image(data)
-        tweet_text = build_tweet_text(data, 'mtf')
-
-        post_to_twitter(tweet_text, image_file)
-
-        if os.path.exists(image_file):
-            os.remove(image_file)
-
-        return jsonify({"status": "success", "message": "MTF insights update posted."}), 200
-
+        data = fetch_mtf_robust()
+        if not data: return jsonify({"status": "error", "message": "No MTF data found in last 7 days"}), 500
+        
+        img_path = create_mtf_image(data)
+        
+        # Build Tweet
+        sign = "+" if data['net'] >= 0 else ""
+        txt = (
+            f"MTF Insights | {data['date']}\n\n"
+            f"🔹 Added: ₹{data['added']:,.0f} Cr\n"
+            f"🔻 Liquidated: ₹{data['liquidated']:,.0f} Cr\n"
+            f"📊 Net Flow: {sign}₹{data['net']:,.0f} Cr\n\n"
+            f"📚 Total Book: ₹{data['industry_book']:,.0f} Cr\n\n"
+            f"#MTF #StockMarketIndia #Nifty #Trading"
+        )
+        
+        # Post
+        api = get_twitter_api()
+        if api:
+            media = api.media_upload(img_path)
+            api.update_status(status=txt, media_ids=[media.media_id])
+            
+        return jsonify({"status": "posted", "date": data['date']}), 200
     except Exception as e:
-        print(f"An unexpected error occurred: {e}")
-        return jsonify({"status": "error", "message": f"An unexpected error occurred: {str(e)}"}), 500
+        print(f"MTF Error: {e}")
+        return jsonify({"error": str(e)}), 500
 
-@app.route('/', methods=['GET'])
+@app.route('/')
 def home():
-    return jsonify({"status": "ok", "message": "Tweet Bot API is running!"}), 200
+    return "Tweet Bot is Running!"
+
+# No app.run() needed for Vercel
