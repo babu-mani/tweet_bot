@@ -1,20 +1,22 @@
 {
   "version": 2,
-  "builds": [
-    {
-      "src": "api/index.py",
-      "use": "@vercel/python",
-      "config": {
-        "maxLambdaSize": "15mb",
-        "runtime": "python3.9",
-        "wsgi_app": "api/index.py"
-      }
-    }
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/api/index.py" }
   ],
-  "routes": [
+  "functions": {
+    "api/index.py": {
+      "maxDuration": 10,
+      "memory": 1024
+    }
+  },
+  "crons": [
     {
-      "src": "/(.*)",
-      "dest": "api/index.py"
+      "path": "/global-market-update",
+      "schedule": "0 3 * * *"
+    },
+    {
+      "path": "/mtf-insights-update",
+      "schedule": "15 3 * * *"
     }
   ]
 }
