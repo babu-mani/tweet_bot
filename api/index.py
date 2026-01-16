@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # Author: ChartWizMani
 # Description: Generates and posts financial market updates (Global & MTF) to Twitter.
-# Vercel-Ready: Uses /tmp for storage and headless Matplotlib.
+# Vercel-Ready: Optimized for 10s timeouts & /tmp permissions.
 
 from flask import Flask, jsonify
 import os
@@ -12,31 +12,33 @@ import tweepy
 import yfinance as yf
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
-from PIL import Image, ImageDraw, ImageFont # For Global Market Image
+from PIL import Image, ImageDraw, ImageFont 
 from dotenv import load_dotenv
 import zipfile
 import io
 import pandas as pd
 
-# --- MATPLOTLIB SETUP (Must be before pyplot import) ---
+# --- VERCEL FIXES (MUST BE AT THE VERY TOP) ---
+# 1. Force Matplotlib to use /tmp for caching to stop permission errors
+os.environ['MPLCONFIGDIR'] = '/tmp'
+# 2. Force yfinance to use /tmp
+yf.set_tz_cache_location("/tmp/yf_tz_cache") 
+
+# --- MATPLOTLIB SETUP ---
 import matplotlib
-matplotlib.use('Agg') # Force headless mode for Vercel
+matplotlib.use('Agg') # Headless mode (no GUI)
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
 import matplotlib.patches as patches
 
-# --- SERVERLESS CONFIG ---
 load_dotenv()
-yf.set_tz_cache_location("/tmp/yf_tz_cache") # Fix for Vercel Read-Only FS
-
 app = Flask(__name__)
 
-# --- FONTS CONFIGURATION ---
-# We use the existing Roboto-Bold.ttf for everything to keep it simple
+# --- CONFIGURATION ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# Assumes Roboto-Bold.ttf is in the same folder as index.py
 FONT_PATH = os.path.join(BASE_DIR, "Roboto-Bold.ttf")
 
-# --- STYLING CONSTANTS (MTF) ---
 COLORS = {
     'bg': '#111827', 'card_bg': '#1F2937', 'title': '#F9FAFB',
     'subtitle': '#9CA3AF', 'text': '#E5E7EB', 'accent': '#3B82F6',
@@ -58,11 +60,10 @@ def get_twitter_api():
     return tweepy.API(auth)
 
 # =========================================
-# PART 1: GLOBAL MARKET FUNCTIONS (Existing)
+# PART 1: GLOBAL MARKET FUNCTIONS
 # =========================================
 
 def get_pil_font(size):
-    """Helper for Pillow fonts (Global Market)"""
     if not os.path.exists(FONT_PATH):
         return ImageFont.load_default()
     return ImageFont.truetype(FONT_PATH, size)
@@ -71,7 +72,8 @@ def fetch_gift_nifty():
     try:
         url = "https://groww.in/indices/global-indices/sgx-nifty"
         headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(url, headers=headers, timeout=10)
+        # Reduced timeout for speed
+        response = requests.get(url, headers=headers, timeout=4)
         soup = BeautifulSoup(response.text, 'html.parser')
         data = json.loads(soup.find('script', {'id': '__NEXT_DATA__'}).string)
         price_data = data['props']['pageProps']['globalIndicesData']['priceData']
@@ -83,7 +85,7 @@ def fetch_gift_nifty():
 def get_yfinance_data(ticker_symbol):
     try:
         ticker = yf.Ticker(ticker_symbol)
-        hist = ticker.history(period="1mo")
+        hist = ticker.history(period="5d") # Reduced from 1mo to 5d for speed
         hist = hist.dropna()
         if len(hist) < 2: return None, None
         curr = hist['Close'].iloc[-1]
@@ -112,7 +114,6 @@ def create_global_image(data):
     img = Image.new('RGB', (width, height), color=(20, 20, 40))
     draw = ImageDraw.Draw(img)
     
-    # Draw logic
     draw.text((width/2, 150), "Global Market Update", font=get_pil_font(78), fill=(255,255,255), anchor="mm")
     draw.text((width/2, 230), datetime.now().strftime("%d %b, %Y"), font=get_pil_font(48), fill=(180,180,200), anchor="mm")
 
@@ -125,7 +126,6 @@ def create_global_image(data):
         draw.text((width-100, y_pos), chg, font=get_pil_font(42), fill=col, anchor="rm")
         y_pos += 100
 
-    # Watermark
     draw.text((width/2, height-50), "@ChartWizMani | Data as of " + datetime.now().strftime('%d-%b-%Y'), font=get_pil_font(28), fill=(180,180,200), anchor="mm")
     
     filename = "/tmp/global_update.png"
@@ -133,34 +133,34 @@ def create_global_image(data):
     return filename
 
 # =========================================
-# PART 2: MTF FUNCTIONS (New & Robust)
+# PART 2: MTF FUNCTIONS
 # =========================================
 
 def get_mpl_font_props():
-    """Helper for Matplotlib fonts (Uses Roboto-Bold.ttf)"""
     try:
         return fm.FontProperties(fname=FONT_PATH) if os.path.exists(FONT_PATH) else fm.FontProperties()
     except:
         return fm.FontProperties()
 
 def fetch_mtf_robust():
-    """Loops back 7 days to find the latest valid NSE MTF report"""
     session = requests.Session()
     session.headers.update({'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.nseindia.com/'})
     
-    # Prime session
-    try: session.get("https://www.nseindia.com/", timeout=3)
+    # Prime session (Fast timeout)
+    try: session.get("https://www.nseindia.com/", timeout=2)
     except: pass
 
-    for days_ago in range(7):
+    # Only look back 5 days to ensure we don't hit the 10s execution limit
+    for days_ago in range(5): 
         target_date = datetime.now() - timedelta(days=days_ago)
         date_url = target_date.strftime("%d%m%y")
         date_display = target_date.strftime("%d-%b-%Y")
         url = f"https://nsearchives.nseindia.com/content/equities/mrg_trading_{date_url}.zip"
 
         try:
-            print(f"Checking MTF for {date_display}...")
-            resp = session.get(url, timeout=10)
+            print(f"Checking {date_display}...")
+            # STRICT 3s TIMEOUT per attempt to prevent hanging
+            resp = session.get(url, timeout=3)
             if resp.status_code == 404: continue
             
             with zipfile.ZipFile(io.BytesIO(resp.content)) as z:
@@ -168,7 +168,6 @@ def fetch_mtf_robust():
                 with z.open(csv_name) as f:
                     content = f.read()
                     
-                    # 1. Parse Summary
                     df_sum = pd.read_csv(io.BytesIO(content), header=None, nrows=20)
                     def get_val(k):
                         row = df_sum[df_sum[1].str.contains(k, na=False, case=False)]
@@ -182,7 +181,6 @@ def fetch_mtf_robust():
                     }
                     data['net'] = data['added'] - data['liquidated']
 
-                    # 2. Parse Top 10s
                     csv_lines = content.decode('utf-8', errors='ignore').splitlines()
                     header_idx = next((i for i, l in enumerate(csv_lines) if "Symbol" in l and "Qty" in l), -1)
                     
@@ -190,7 +188,6 @@ def fetch_mtf_robust():
                     if header_idx != -1:
                         df = pd.read_csv(io.BytesIO(content), skiprows=header_idx)
                         df.columns = [c.strip() for c in df.columns]
-                        # Robust column finding
                         col_sym = next((c for c in df.columns if "Symbol" in c), "Symbol")
                         col_amt = next((c for c in df.columns if "Amt" in c and "Fin" in c), None)
                         col_qty = next((c for c in df.columns if "Qty" in c and "Fin" in c), None)
@@ -210,11 +207,8 @@ def fetch_mtf_robust():
     return None
 
 def create_mtf_image(data):
-    # Setup
     fig = plt.figure(figsize=(16, 9), facecolor=COLORS['bg'])
     ax = fig.add_axes([0,0,1,1]); ax.axis('off')
-    
-    # Use existing Roboto font
     font_main = get_mpl_font_props()
     
     # Header
@@ -253,7 +247,6 @@ def create_mtf_image(data):
     draw_list("Top 10 Additions (Value)", data.get('top_val', []), 0.05, False)
     draw_list("Top 10 Volume Buzzers", data.get('top_vol', []), 0.52, True)
 
-    # Watermark
     fig.text(0.98, 0.02, f"@ChartWizMani | Data as of {data['date']}", ha='right', fontproperties=font_main, fontsize=12, color=COLORS['subtitle'])
 
     filename = "/tmp/mtf_insights.png"
@@ -273,14 +266,12 @@ def global_market_update():
         
         img_path = create_global_image(data)
         
-        # Build Tweet
         txt = [f"Global Market Update – {datetime.now().strftime('%d %b')}\n"]
         for k in ["GIFTNIFTY", "Nikkei 225", "Dow Futures", "S&P 500", "Nasdaq"]:
             v, c = data.get(k, ("N/A", "0%"))
             txt.append(f"{k}: {v} ({c})")
         txt.append("\n#StockMarket #Nifty #GIFTNIFTY")
         
-        # Post
         api = get_twitter_api()
         if api:
             media = api.media_upload(img_path)
@@ -288,17 +279,20 @@ def global_market_update():
             
         return jsonify({"status": "posted"}), 200
     except Exception as e:
+        print(f"Global Error: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/mtf-insights-update')
 def mtf_insights_update():
     try:
         data = fetch_mtf_robust()
-        if not data: return jsonify({"status": "error", "message": "No MTF data found in last 7 days"}), 500
+        if not data: 
+            # Log this explicitly so you see it in Vercel logs
+            print("❌ No MTF data found after checking last 5 days.")
+            return jsonify({"status": "error", "message": "No MTF data found in last 5 days"}), 500
         
         img_path = create_mtf_image(data)
         
-        # Build Tweet
         sign = "+" if data['net'] >= 0 else ""
         txt = (
             f"MTF Insights | {data['date']}\n\n"
@@ -309,7 +303,6 @@ def mtf_insights_update():
             f"#MTF #StockMarketIndia #Nifty #Trading"
         )
         
-        # Post
         api = get_twitter_api()
         if api:
             media = api.media_upload(img_path)
@@ -317,7 +310,7 @@ def mtf_insights_update():
             
         return jsonify({"status": "posted", "date": data['date']}), 200
     except Exception as e:
-        print(f"MTF Error: {e}")
+        print(f"MTF Critical Error: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/')
