@@ -1,286 +1,221 @@
 # -*- coding: utf-8 -*-
 # Author: ChartWizMani
-# Description: "Lite" Version - No Pandas/Matplotlib (Fixes Vercel 500 Error)
+# Date: 03-Dec-2025 (Updated for Robust Data Fetching)
+# Description: Generates and posts financial market updates to Twitter.
 
+from flask import Flask, jsonify, request
 import os
 import sys
 import json
+import re
 import requests
 import tweepy
-import zipfile
-import io
-import csv
-from datetime import datetime, timedelta
+import yfinance as yf
+from datetime import datetime
+from bs4 import BeautifulSoup
+from PIL import Image, ImageDraw, ImageFont
 from dotenv import load_dotenv
 
-# Force logs to show up immediately
-sys.stdout.reconfigure(line_buffering=True)
+# --- FIX 1: Writable yfinance cache ---
+yf.set_tz_cache_location("/tmp/yf_tz_cache")
 
-# Use Pillow for ALL imaging (Lightweight)
-from PIL import Image, ImageDraw, ImageFont
-
-from flask import Flask, jsonify
-
-load_dotenv()
 app = Flask(__name__)
 
-# --- CONFIGURATION ---
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-FONT_PATH = os.path.join(BASE_DIR, "Roboto-Bold.ttf")
+# --- Configuration ---
+FONT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Roboto-Bold.ttf")
+WIDTH, HEIGHT = 1080, 1080
+load_dotenv()
 
-COLORS = {
-    'bg': (17, 24, 39),       # #111827
-    'card_bg': (31, 41, 55),  # #1F2937
-    'text': (229, 231, 235),  # #E5E7EB
-    'accent': (59, 130, 246), # #3B82F6
-    'pos': (16, 185, 129),    # #10B981
-    'neg': (244, 63, 94),     # #F43F5E
-    'sub': (156, 163, 175)    # #9CA3AF
-}
+# --- Font Helpers ---
+def get_font(size: int):
+    if not os.path.exists(FONT_PATH):
+        raise FileNotFoundError(f"Font not found: {FONT_PATH}")
+    return ImageFont.truetype(FONT_PATH, size)
 
-# --- HELPER: FONTS ---
-def get_font(size):
-    if os.path.exists(FONT_PATH):
-        return ImageFont.truetype(FONT_PATH, size)
-    return ImageFont.load_default()
+def draw_text(draw, position, text, font, fill, anchor="mm"):
+    draw.text(position, text, font=font, fill=fill, anchor=anchor)
 
-# --- HELPER: TWITTER AUTH ---
-def get_twitter_api():
+# --- Data Fetching ---
+def fetch_gift_nifty():
     try:
-        api_key = os.getenv("TWITTER_API_KEY")
-        api_secret = os.getenv("TWITTER_API_SECRET")
-        access_token = os.getenv("TWITTER_ACCESS_TOKEN")
-        access_token_secret = os.getenv("TWITTER_ACCESS_TOKEN_SECRET")
+        url = "https://groww.in/indices/global-indices/sgx-nifty"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(url, headers=headers, timeout=20)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "html.parser")
+        data = json.loads(soup.find("script", {"id": "__NEXT_DATA__"}).string)
+        p = data["props"]["pageProps"]["globalIndicesData"]["priceData"]
+        return f"{p['value']:,.2f}", f"{p['dayChangePerc']:+.2f}%"
+    except Exception:
+        return None, None
 
-        if not all([api_key, api_secret, access_token, access_token_secret]):
-            print("❌ Missing Twitter Keys!", flush=True)
-            return None
+def get_yfinance_data(symbol):
+    try:
+        hist = yf.Ticker(symbol).history(period="1mo").dropna()
+        if len(hist) < 2:
+            return None, None
+        curr = hist["Close"].iloc[-1]
+        prev = hist["Close"].iloc[-2]
+        chg = ((curr - prev) / prev) * 100
+        return f"{curr:,.2f}", f"{chg:+.2f}%"
+    except Exception:
+        return None, None
 
-        auth = tweepy.OAuth1UserHandler(api_key, api_secret, access_token, access_token_secret)
-        return tweepy.API(auth)
-    except Exception as e:
-        print(f"❌ Twitter Auth Error: {e}", flush=True)
+def fetch_global_market_data():
+    data = {}
+    tickers = {
+        "Nikkei 225": "^N225",
+        "Dow Jones Futures": "YM=F",
+        "S&P 500": "^GSPC",
+        "Nasdaq": "^IXIC",
+        "Hang Seng": "^HSI",
+    }
+
+    gn_val, gn_chg = fetch_gift_nifty()
+    if gn_val:
+        data["GIFTNIFTY"] = (gn_val, gn_chg)
+
+    for name, sym in tickers.items():
+        v, c = get_yfinance_data(sym)
+        if v:
+            data[name] = (v, c)
+
+    return data
+
+def fetch_mtf_data():
+    try:
+        url = "https://scanx.trade/insight/mtf-insight"
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "html.parser")
+        txt = soup.get_text()
+
+        insights = {}
+        d = re.search(r"as on (\w{3} \d{1,2}, \d{4})", txt)
+        insights["date"] = d.group(1) if d else "N/A"
+
+        patterns = {
+            "Positions Added": r"Positions Added:\s*\+?₹\s*([\d,]+\.?\d*)\s*Cr",
+            "Positions Liquidated": r"Positions Liquidated:\s*([+\-]?)₹\s*([\d,]+\.?\d*)\s*Cr",
+            "Industry MTF Book": r"Industry MTF Book:\s*₹\s*([\d,]+\.?\d*)\s*Cr",
+        }
+
+        net = re.search(r"(Net Book (?:Added|Liquidated)):\s*([+\-]?)₹\s*([\d,]+\.?\d*)\s*Cr", txt)
+        if net:
+            insights[net.group(1)] = f"₹{net.group(2)}{net.group(3)} Cr"
+
+        for k, p in patterns.items():
+            m = re.search(p, txt)
+            if not m:
+                return None
+            if k == "Positions Liquidated":
+                insights[k] = f"₹{m.group(1)}{m.group(2)} Cr"
+            else:
+                insights[k] = f"₹{m.group(1)} Cr"
+
+        return insights
+    except Exception:
         return None
 
-# =========================================
-# PART 1: GLOBAL MARKET (Standard)
-# =========================================
-@app.route('/global-market-update')
-def global_market_update():
-    print("🚀 Starting Global...", flush=True)
-    try:
-        import yfinance as yf # Lazy load
-        yf.set_tz_cache_location("/tmp/yf_tz_cache")
-        from bs4 import BeautifulSoup
-        
-        data = {}
-        
-        # 1. GIFT Nifty
-        try:
-            url = "https://groww.in/indices/global-indices/sgx-nifty"
-            resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=3)
-            soup = BeautifulSoup(resp.text, 'html.parser')
-            raw = json.loads(soup.find('script', {'id': '__NEXT_DATA__'}).string)
-            price = raw['props']['pageProps']['globalIndicesData']['priceData']
-            data["GIFTNIFTY"] = (f"{price['value']:,.2f}", f"{price['dayChangePerc']:+.2f}%")
-        except: pass
+# --- Image Creation ---
+def watermark(draw):
+    txt = f"@ChartWizMani | {datetime.now().strftime('%d-%b-%Y')} | For education only"
+    draw_text(draw, (WIDTH / 2, HEIGHT - 50), txt, get_font(26), (180, 180, 200))
 
-        # 2. Global Tickers
-        tickers = {"Nikkei 225": "^N225", "Dow Futures": "YM=F", "S&P 500": "^GSPC", "Nasdaq": "^IXIC", "Hang Seng": "^HSI"}
-        for name, sym in tickers.items():
-            try:
-                hist = yf.Ticker(sym).history(period="5d")
-                if len(hist) >= 2:
-                    curr = hist['Close'].iloc[-1]
-                    prev = hist['Close'].iloc[-2]
-                    chg = ((curr - prev) / prev) * 100
-                    data[name] = (f"{curr:,.2f}", f"{chg:+.2f}%")
-            except: continue
+def create_market_image(data):
+    img = Image.new("RGB", (WIDTH, HEIGHT), (20, 20, 40))
+    d = ImageDraw.Draw(img)
 
-        # 3. Draw Image (Pillow)
-        img = Image.new('RGB', (1080, 1080), color=(20, 20, 40))
-        draw = ImageDraw.Draw(img)
-        
-        draw.text((540, 150), "Global Market Update", font=get_font(78), fill="white", anchor="mm")
-        draw.text((540, 230), datetime.now().strftime("%d %b, %Y"), font=get_font(48), fill=COLORS['sub'], anchor="mm")
+    draw_text(d, (WIDTH / 2, 150), "Global Market Update", get_font(78), (255, 255, 255))
+    draw_text(d, (WIDTH / 2, 230), datetime.now().strftime("%d %b, %Y"), get_font(48), (180, 180, 200))
 
-        y = 360
-        for k in ["GIFTNIFTY", "Nikkei 225", "Dow Futures", "S&P 500", "Nasdaq", "Hang Seng"]:
-            v, c = data.get(k, ("N/A", "0%"))
-            col = (255, 80, 80) if c.startswith('-') else (80, 255, 80)
-            draw.text((100, y), f"{k}:", font=get_font(42), fill="white", anchor="lm")
-            draw.text((750, y), v, font=get_font(42), fill="white", anchor="rm")
-            draw.text((980, y), c, font=get_font(42), fill=col, anchor="rm")
-            y += 100
-            
-        draw.text((540, 1030), "@ChartWizMani | Data as of Today", font=get_font(28), fill=COLORS['sub'], anchor="mm")
-        
-        filename = "/tmp/global_update.png"
-        img.save(filename)
+    y = 360
+    for k in ["GIFTNIFTY", "Nikkei 225", "Dow Jones Futures", "S&P 500", "Nasdaq", "Hang Seng"]:
+        v, c = data.get(k, ("N/A", "+0.00%"))
+        col = (255, 80, 80) if c.startswith("-") else (80, 255, 80)
+        draw_text(d, (100, y), f"{k}:", get_font(42), (255, 255, 255), "ls")
+        draw_text(d, (750, y), v, get_font(42), (255, 255, 255), "rs")
+        draw_text(d, (WIDTH - 100, y), c, get_font(42), col, "rs")
+        y += 100
 
-        # 4. Post
-        api = get_twitter_api()
-        if api:
-            txt = [f"Global Market Update – {datetime.now().strftime('%d %b')}\n"]
-            for k, (v, c) in data.items(): txt.append(f"{k}: {v} ({c})")
-            txt.append("\n#StockMarket #Nifty")
-            media = api.media_upload(filename)
-            api.update_status(status="\n".join(txt), media_ids=[media.media_id])
-            
-        return jsonify({"status": "posted"}), 200
-    except Exception as e:
-        print(f"Global Error: {e}", flush=True)
-        return jsonify({"error": str(e)}), 500
+    watermark(d)
+    path = "/tmp/global_market.png"
+    img.save(path)
+    return path
 
-# =========================================
-# PART 2: MTF INSIGHTS (The Lite Engine)
-# =========================================
-@app.route('/mtf-insights-update')
-def mtf_insights_update():
-    print("🚀 Starting MTF (Lite)...", flush=True)
-    try:
-        session = requests.Session()
-        session.headers.update({'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.nseindia.com/'})
-        try: session.get("https://www.nseindia.com/", timeout=2)
-        except: pass
+def create_mtf_image(data):
+    img = Image.new("RGB", (WIDTH, HEIGHT), (40, 20, 20))
+    d = ImageDraw.Draw(img)
 
-        mtf_data = None
-        
-        # 1. Fetch CSV (No Pandas)
-        for days_ago in range(3):
-            target_date = datetime.now() - timedelta(days=days_ago)
-            date_url = target_date.strftime("%d%m%y")
-            url = f"https://nsearchives.nseindia.com/content/equities/mrg_trading_{date_url}.zip"
-            
-            print(f"   Checking {url}...", flush=True)
-            try:
-                resp = session.get(url, timeout=3)
-                if resp.status_code == 200:
-                    with zipfile.ZipFile(io.BytesIO(resp.content)) as z:
-                        csv_name = [f for f in z.namelist() if f.lower().endswith('.csv')][0]
-                        with z.open(csv_name) as f:
-                            # Read lines as text
-                            lines = f.read().decode('utf-8', errors='ignore').splitlines()
-                            
-                            # A. Parse Summary (Top 20 lines)
-                            added = 0.0; liquidated = 0.0; book = 0.0
-                            for line in lines[:20]:
-                                if "Fresh Exposure" in line: added = float(line.split(',')[2].replace(',', ''))/100
-                                if "Exposure liquidated" in line: liquidated = float(line.split(',')[2].replace(',', ''))/100
-                                if "Net scripwise" in line: book = float(line.split(',')[2].replace(',', ''))/100
-                            
-                            # B. Parse Details (Find Header)
-                            header_idx = -1
-                            for i, line in enumerate(lines):
-                                if "Symbol" in line and "Qty" in line:
-                                    header_idx = i; break
-                            
-                            top_val = []; top_vol = []
-                            if header_idx != -1:
-                                # Parse CSV manually (Symbol is col 0, Amt is last col usually)
-                                # We need to be careful with column indices. 
-                                # Header: Symbol, Name, Qty, Amt
-                                reader = csv.reader(lines[header_idx+1:])
-                                rows = []
-                                for row in reader:
-                                    if len(row) < 4: continue
-                                    try:
-                                        sym = row[0]
-                                        qty = float(row[2])
-                                        amt = float(row[3])
-                                        rows.append({'sym': sym, 'qty': qty, 'amt': amt})
-                                    except: continue
-                                
-                                # Sort by Value
-                                rows.sort(key=lambda x: x['amt'], reverse=True)
-                                top_val = [(r['sym'], r['amt']/100) for r in rows[:10]]
-                                
-                                # Sort by Volume
-                                rows.sort(key=lambda x: x['qty'], reverse=True)
-                                top_vol = [(r['sym'], r['qty']) for r in rows[:10]]
+    draw_text(d, (WIDTH / 2, 150), "MTF Insights", get_font(78), (255, 255, 255))
+    draw_text(d, (WIDTH / 2, 230), f"(as on {data.get('date')})", get_font(48), (200, 180, 200))
 
-                            mtf_data = {
-                                'date': target_date.strftime("%d-%b-%Y"),
-                                'added': added, 'liquidated': liquidated,
-                                'net': added - liquidated, 'book': book,
-                                'top_val': top_val, 'top_vol': top_vol
-                            }
-                    break # Success
-            except Exception as e:
-                print(f"   Skip {date_url}: {e}", flush=True)
-                continue
+    y = 380
+    for k, v in data.items():
+        if k == "date":
+            continue
+        draw_text(d, (80, y), f"- {k}:", get_font(46), (255, 255, 255), "ls")
+        draw_text(d, (WIDTH - 80, y), v, get_font(46), (255, 223, 186), "rs")
+        y += 120
 
-        if not mtf_data:
-            return jsonify({"error": "No data found"}), 500
+    watermark(d)
+    path = "/tmp/mtf.png"
+    img.save(path)
+    return path
 
-        # 2. Draw Dashboard (Pillow - mimicking Matplotlib)
-        print("   Drawing Chart...", flush=True)
-        W, H = 1600, 900
-        img = Image.new('RGB', (W, H), color=COLORS['bg'])
-        draw = ImageDraw.Draw(img)
+# --- Tweet ---
+def build_tweet(data, t):
+    if t == "global":
+        lines = [f"Global Market Update – {datetime.now().strftime('%d %b, %Y')}\n"]
+        for k, (v, c) in data.items():
+            lines.append(f"{k}: {v} ({c})")
+        lines.append("\n#GIFTNIFTY #Nifty #DowJones #Nasdaq")
+    else:
+        lines = [f"MTF Insights (as on {data.get('date')})\n"]
+        for k, v in data.items():
+            if k != "date":
+                lines.append(f"- {k}: {v}")
+        lines.append("\n#MTF #Nifty #BankNifty")
+    return "\n".join(lines)
 
-        # Header
-        draw.text((50, 50), "MTF Market Insights", font=get_font(60), fill="white")
-        draw.text((50, 130), f"Margin Trading Funding Analysis | {mtf_data['date']}", font=get_font(30), fill=COLORS['sub'])
+def post_to_twitter(text, image):
+    client = tweepy.Client(
+        consumer_key=os.getenv("TWITTER_API_KEY"),
+        consumer_secret=os.getenv("TWITTER_API_SECRET"),
+        access_token=os.getenv("TWITTER_ACCESS_TOKEN"),
+        access_token_secret=os.getenv("TWITTER_ACCESS_TOKEN_SECRET"),
+    )
 
-        # KPI Cards (Manual Drawing)
-        cards = [
-            ("Added", f"₹{mtf_data['added']:,.0f} Cr", COLORS['pos']),
-            ("Liquidated", f"₹{mtf_data['liquidated']:,.0f} Cr", COLORS['neg']),
-            ("Net Flow", f"{'+' if mtf_data['net']>=0 else ''}₹{mtf_data['net']:,.0f} Cr", COLORS['pos'] if mtf_data['net']>=0 else COLORS['neg']),
-            ("Total Book", f"₹{mtf_data['book']:,.0f} Cr", COLORS['accent'])
-        ]
-        
-        card_w, card_h = 350, 200
-        start_x, start_y = 50, 220
-        gap = 40
-        
-        for i, (title, val, col) in enumerate(cards):
-            x = start_x + i * (card_w + gap)
-            draw.rectangle([x, start_y, x+card_w, start_y+card_h], fill=COLORS['card_bg'], outline=None)
-            draw.text((x + card_w/2, start_y + 40), title, font=get_font(28), fill=COLORS['sub'], anchor="mm")
-            draw.text((x + card_w/2, start_y + 120), val, font=get_font(48), fill=col, anchor="mm")
+    auth = tweepy.OAuth1UserHandler(
+        os.getenv("TWITTER_API_KEY"),
+        os.getenv("TWITTER_API_SECRET"),
+        os.getenv("TWITTER_ACCESS_TOKEN"),
+        os.getenv("TWITTER_ACCESS_TOKEN_SECRET"),
+    )
 
-        # Tables
-        def draw_list_box(title, items, x_pos, is_vol):
-            draw.text((x_pos, 500), title, font=get_font(32), fill=COLORS['accent'])
-            y = 560
-            for idx, (sym, val) in enumerate(items):
-                bg = COLORS['card_bg'] if idx % 2 == 0 else COLORS['bg']
-                draw.rectangle([x_pos, y, x_pos+700, y+50], fill=bg)
-                
-                val_str = f"{val/1e6:.1f}M" if is_vol and val>1e6 else (f"{val/1e3:.0f}K" if is_vol else f"₹{val:,.1f} Cr")
-                col = COLORS['accent'] if is_vol else COLORS['pos']
-                
-                draw.text((x_pos+20, y+25), f"{idx+1}. {sym}", font=get_font(28), fill=COLORS['text'], anchor="lm")
-                draw.text((x_pos+680, y+25), val_str, font=get_font(28), fill=col, anchor="rm")
-                y += 55
+    api = tweepy.API(auth)
+    media = api.media_upload(image)
+    client.create_tweet(text=text, media_ids=[media.media_id_string])
 
-        draw_list_box("Top 10 Additions (Value)", mtf_data['top_val'], 50, False)
-        draw_list_box("Top 10 Volume Buzzers", mtf_data['top_vol'], 850, True)
+# --- Routes ---
+@app.route("/global-market-update")
+def global_update():
+    data = fetch_global_market_data()
+    if not data:
+        return jsonify({"status": "error"}), 500
+    img = create_market_image(data)
+    post_to_twitter(build_tweet(data, "global"), img)
+    return jsonify({"status": "success"})
 
-        draw.text((W-50, H-50), f"@ChartWizMani | {mtf_data['date']}", font=get_font(24), fill=COLORS['sub'], anchor="rm")
-        
-        filename = "/tmp/mtf_lite.png"
-        img.save(filename)
+@app.route("/mtf-insights-update")
+def mtf_update():
+    data = fetch_mtf_data()
+    if not data:
+        return jsonify({"status": "error"}), 500
+    img = create_mtf_image(data)
+    post_to_twitter(build_tweet(data, "mtf"), img)
+    return jsonify({"status": "success"})
 
-        # 3. Post
-        api = get_twitter_api()
-        if api:
-            sign = "+" if mtf_data['net'] >= 0 else ""
-            txt = (f"MTF Insights | {mtf_data['date']}\n\n"
-                   f"Added: ₹{mtf_data['added']:,.0f} Cr\n"
-                   f"Liquidated: ₹{mtf_data['liquidated']:,.0f} Cr\n"
-                   f"Net: {sign}₹{mtf_data['net']:,.0f} Cr\n"
-                   f"Total Book: ₹{mtf_data['book']:,.0f} Cr\n\n#MTF #Nifty")
-            media = api.media_upload(filename)
-            api.update_status(status=txt, media_ids=[media.media_id])
-            
-        return jsonify({"status": "posted", "date": mtf_data['date']}), 200
-
-    except Exception as e:
-        print(f"❌ MTF Error: {e}", flush=True)
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/')
-def home(): return "Tweet Bot Lite (Vercel Optimized) Running"
+@app.route("/")
+def home():
+    return jsonify({"status": "ok", "message": "ChartWizMani Tweet Bot running"})
