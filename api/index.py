@@ -1,221 +1,350 @@
-# -*- coding: utf-8 -*-
-# Author: ChartWizMani
-# Date: 03-Dec-2025 (Updated for Robust Data Fetching)
-# Description: Generates and posts financial market updates to Twitter.
+# main.py
+# Version 18.0: Final Layout + Exact Tweet Format
 
-from flask import Flask, jsonify, request
 import os
-import sys
 import json
-import re
 import requests
+import textwrap
+import csv
+import io
 import tweepy
 import yfinance as yf
-from datetime import datetime
-from bs4 import BeautifulSoup
+from datetime import datetime, timedelta
 from PIL import Image, ImageDraw, ImageFont
-from dotenv import load_dotenv
+from bs4 import BeautifulSoup
 
-# --- FIX 1: Writable yfinance cache ---
-yf.set_tz_cache_location("/tmp/yf_tz_cache")
-
-app = Flask(__name__)
-
-# --- Configuration ---
-FONT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Roboto-Bold.ttf")
+# --- CONFIGURATION ---
+OUTPUT_FILE = "global_market_update.png"
+# Fonts must be in the same folder as this script (api/ folder)
+FONT_PATH = "arial.ttf"
 WIDTH, HEIGHT = 1080, 1080
-load_dotenv()
 
-# --- Font Helpers ---
-def get_font(size: int):
-    if not os.path.exists(FONT_PATH):
-        raise FileNotFoundError(f"Font not found: {FONT_PATH}")
-    return ImageFont.truetype(FONT_PATH, size)
+# --- COLORS ---
+COLOR_BG = "#0F172A"
+COLOR_CARD = "#1E293B"
+COLOR_TEXT_MAIN = "#FFFFFF" 
+COLOR_TEXT_SUB = "#94A3B8"
+COLOR_ACCENT = "#38BDF8"
+COLOR_GREEN = "#10B981"
+COLOR_RED = "#EF4444"
+COLOR_NEUTRAL = "#F59E0B"
+COLOR_BAN = "#F43F5E"
+COLOR_HIGH = "#34D399"
 
-def draw_text(draw, position, text, font, fill, anchor="mm"):
-    draw.text(position, text, font=font, fill=fill, anchor=anchor)
+HEADER_TEXT_COLOR = (255, 255, 255)
+HEADER_DATE_COLOR = (180, 180, 200)
+WATERMARK_COLOR   = "#D1D5DB" 
 
-# --- Data Fetching ---
-def fetch_gift_nifty():
+print("1. Initializing...")
+
+# --- GRAPHICS HELPERS ---
+def get_font(size, bold=False):
+    font_file = "arialbd.ttf" if bold else "arial.ttf"
+    try:
+        return ImageFont.truetype(font_file, size)
+    except Exception as e:
+        # Fallback if font is missing
+        return ImageFont.load_default()
+
+def draw_text(draw, pos, text, font, fill, anchor="mm"):
+    draw.text(pos, text, font=font, fill=fill, anchor=anchor)
+
+def draw_card_compact(draw, x, y, w, h, title, value, change_str):
+    draw.rounded_rectangle((x, y, x + w, y + h), radius=12, fill=COLOR_CARD)
+    if change_str.startswith("-"):
+        accent = COLOR_RED
+        arrow = "▼"
+    elif change_str.startswith("+"):
+        accent = COLOR_GREEN
+        arrow = "▲"
+    else:
+        accent = COLOR_TEXT_MAIN
+        arrow = ""
+
+    draw.text((x + 15, y + 15), title, font=get_font(18, bold=True), fill=COLOR_TEXT_SUB, anchor="lt")
+    draw.text((x + 15, y + 45), value, font=get_font(34, bold=True), fill=COLOR_TEXT_MAIN, anchor="lt")
+    clean_change = change_str.replace('+', '').replace('-', '')
+    full_text = f"{arrow} {clean_change}"
+    draw.text((x + w - 15, y + 48), full_text, font=get_font(26, bold=True), fill=accent, anchor="rt")
+
+# --- DATA FETCHERS (CLOUD SAFE) ---
+def get_robust_session():
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0',
+        'Referer': 'https://www.nseindia.com/',
+        'Accept': '*/*'
+    })
+    return session
+
+def fetch_fo_ban_list():
+    print("   Fetching F&O Ban List...")
+    session = get_robust_session()
+    # Check last 5 days
+    for i in range(5):
+        dt = datetime.now() - timedelta(days=i)
+        date_str = dt.strftime("%d%m%Y")
+        url = f"https://nsearchives.nseindia.com/archives/fo/sec_ban/fo_secban_{date_str}.csv"
+        try:
+            r = session.get(url, timeout=5)
+            if r.status_code == 200:
+                lines = r.text.splitlines()
+                ban_list = []
+                for line in lines[1:]:
+                    if line.strip():
+                        parts = line.split(',')
+                        if len(parts) >= 2: ban_list.append(parts[1].strip())
+                return ban_list
+        except:
+            continue
+    return []
+
+def fetch_52wk_data():
+    print("   Fetching 52W High/Low Data...")
+    session = get_robust_session()
+    for i in range(5):
+        dt = datetime.now() - timedelta(days=i)
+        date_str = dt.strftime("%d%m%Y")
+        url = f"https://nsearchives.nseindia.com/content/CM_52_wk_High_low_{date_str}.csv"
+        try:
+            r = session.get(url, timeout=10)
+            if r.status_code == 200:
+                f = io.StringIO(r.text)
+                reader = csv.reader(f)
+                rows = list(reader)
+                if len(rows) > 2:
+                    header_idx = 0
+                    for idx, row in enumerate(rows):
+                        if row and "SYMBOL" in row[0]:
+                            header_idx = idx
+                            break
+                    data_rows = rows[header_idx+1:]
+                    parsed_data = []
+                    for row in data_rows:
+                        if len(row) < 6: continue
+                        sym = row[0]
+                        try:
+                            h_dt = datetime.strptime(row[3].strip().upper(), "%d-%b-%Y")
+                            l_dt = datetime.strptime(row[5].strip().upper(), "%d-%b-%Y")
+                            parsed_data.append((sym, h_dt, l_dt))
+                        except:
+                            continue
+                    if not parsed_data: continue
+                    max_h_date = max(p[1] for p in parsed_data)
+                    max_l_date = max(p[2] for p in parsed_data)
+                    highs = [p[0] for p in parsed_data if p[1] == max_h_date]
+                    lows = [p[0] for p in parsed_data if p[2] == max_l_date]
+                    return {"highs": highs, "lows": lows, "date": max_h_date.strftime("%d-%b")}
+        except:
+            continue
+    return {"highs": [], "lows": [], "date": "N/A"}
+
+def fetch_gift_nifty_live():
     try:
         url = "https://groww.in/indices/global-indices/sgx-nifty"
         headers = {"User-Agent": "Mozilla/5.0"}
-        r = requests.get(url, headers=headers, timeout=20)
-        r.raise_for_status()
-        soup = BeautifulSoup(r.text, "html.parser")
-        data = json.loads(soup.find("script", {"id": "__NEXT_DATA__"}).string)
+        r = requests.get(url, headers=headers, timeout=10)
+        data = json.loads(BeautifulSoup(r.text, "html.parser").find("script", {"id": "__NEXT_DATA__"}).string)
         p = data["props"]["pageProps"]["globalIndicesData"]["priceData"]
         return f"{p['value']:,.2f}", f"{p['dayChangePerc']:+.2f}%"
-    except Exception:
-        return None, None
+    except:
+        return "N/A", "0.00%"
 
-def get_yfinance_data(symbol):
-    try:
-        hist = yf.Ticker(symbol).history(period="1mo").dropna()
-        if len(hist) < 2:
-            return None, None
-        curr = hist["Close"].iloc[-1]
-        prev = hist["Close"].iloc[-2]
-        chg = ((curr - prev) / prev) * 100
-        return f"{curr:,.2f}", f"{chg:+.2f}%"
-    except Exception:
-        return None, None
-
-def fetch_global_market_data():
+def fetch_market_data():
     data = {}
-    tickers = {
+    data["GIFTNIFTY"] = fetch_gift_nifty_live()
+    
+    # yfinance tickers
+    indices = {
         "Nikkei 225": "^N225",
-        "Dow Jones Futures": "YM=F",
+        "Dow Jones Fut": "YM=F",
         "S&P 500": "^GSPC",
         "Nasdaq": "^IXIC",
         "Hang Seng": "^HSI",
+        "Gold (Fut)": "GC=F",
+        "Bitcoin": "BTC-USD"
     }
-
-    gn_val, gn_chg = fetch_gift_nifty()
-    if gn_val:
-        data["GIFTNIFTY"] = (gn_val, gn_chg)
-
-    for name, sym in tickers.items():
-        v, c = get_yfinance_data(sym)
-        if v:
-            data[name] = (v, c)
-
+    
+    for name, ticker in indices.items():
+        print(f"   Fetching {name}...")
+        try:
+            t = yf.Ticker(ticker)
+            hist = t.history(period="5d")
+            curr = hist["Close"].iloc[-1]
+            prev = hist["Close"].iloc[-2]
+            chg = ((curr - prev) / prev) * 100
+            data[name] = (f"{curr:,.2f}", f"{chg:+.2f}%")
+        except Exception as e:
+            print(f"   Error fetching {name}: {e}")
+            data[name] = ("N/A", "0.00%")
+            
     return data
 
-def fetch_mtf_data():
-    try:
-        url = "https://scanx.trade/insight/mtf-insight"
-        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
-        r.raise_for_status()
-        soup = BeautifulSoup(r.text, "html.parser")
-        txt = soup.get_text()
+def calc_market_bias(data):
+    green = 0
+    total = 0
+    for key, val in data.items():
+        chg_str = val[1]
+        if chg_str.startswith("+") and "0.00" not in chg_str:
+            green += 1
+        total += 1
+    ratio = green / total if total > 0 else 0
+    if ratio >= 0.6: return "BULLISH", COLOR_GREEN
+    if ratio <= 0.4: return "BEARISH", COLOR_RED
+    return "NEUTRAL", COLOR_NEUTRAL
 
-        insights = {}
-        d = re.search(r"as on (\w{3} \d{1,2}, \d{4})", txt)
-        insights["date"] = d.group(1) if d else "N/A"
-
-        patterns = {
-            "Positions Added": r"Positions Added:\s*\+?₹\s*([\d,]+\.?\d*)\s*Cr",
-            "Positions Liquidated": r"Positions Liquidated:\s*([+\-]?)₹\s*([\d,]+\.?\d*)\s*Cr",
-            "Industry MTF Book": r"Industry MTF Book:\s*₹\s*([\d,]+\.?\d*)\s*Cr",
-        }
-
-        net = re.search(r"(Net Book (?:Added|Liquidated)):\s*([+\-]?)₹\s*([\d,]+\.?\d*)\s*Cr", txt)
-        if net:
-            insights[net.group(1)] = f"₹{net.group(2)}{net.group(3)} Cr"
-
-        for k, p in patterns.items():
-            m = re.search(p, txt)
-            if not m:
-                return None
-            if k == "Positions Liquidated":
-                insights[k] = f"₹{m.group(1)}{m.group(2)} Cr"
-            else:
-                insights[k] = f"₹{m.group(1)} Cr"
-
-        return insights
-    except Exception:
-        return None
-
-# --- Image Creation ---
-def watermark(draw):
-    txt = f"@ChartWizMani | {datetime.now().strftime('%d-%b-%Y')} | For education only"
-    draw_text(draw, (WIDTH / 2, HEIGHT - 50), txt, get_font(26), (180, 180, 200))
-
-def create_market_image(data):
-    img = Image.new("RGB", (WIDTH, HEIGHT), (20, 20, 40))
+def create_image(data, ban_list, high_low_data):
+    print("3. Generating Image (3-Column Layout)...")
+    img = Image.new("RGB", (WIDTH, HEIGHT), COLOR_BG)
     d = ImageDraw.Draw(img)
 
-    draw_text(d, (WIDTH / 2, 150), "Global Market Update", get_font(78), (255, 255, 255))
-    draw_text(d, (WIDTH / 2, 230), datetime.now().strftime("%d %b, %Y"), get_font(48), (180, 180, 200))
+    draw_text(d, (WIDTH / 2, 70), "Global Market Update", get_font(72, bold=True), HEADER_TEXT_COLOR)
+    draw_text(d, (WIDTH / 2, 135), datetime.now().strftime("%d %b, %Y"), get_font(42), HEADER_DATE_COLOR)
+    
+    bias_text, bias_color = calc_market_bias(data)
+    draw_text(d, (60, 185), f"MARKET BIAS: {bias_text}", get_font(28, bold=True), bias_color, anchor="lm")
+    draw_text(d, (WIDTH - 60, 185), "Live Data | F&O Update", get_font(22), COLOR_ACCENT, anchor="rm")
+    d.line([(50, 210), (WIDTH - 50, 210)], fill=COLOR_CARD, width=2)
 
-    y = 360
-    for k in ["GIFTNIFTY", "Nikkei 225", "Dow Jones Futures", "S&P 500", "Nasdaq", "Hang Seng"]:
-        v, c = data.get(k, ("N/A", "+0.00%"))
-        col = (255, 80, 80) if c.startswith("-") else (80, 255, 80)
-        draw_text(d, (100, y), f"{k}:", get_font(42), (255, 255, 255), "ls")
-        draw_text(d, (750, y), v, get_font(42), (255, 255, 255), "rs")
-        draw_text(d, (WIDTH - 100, y), c, get_font(42), col, "rs")
-        y += 100
+    start_y = 230
+    col_1_x = 50
+    col_2_x = 550
+    card_w = 480
+    card_h = 100
+    gap_y = 20
+    order = ["GIFTNIFTY", "Nikkei 225", "Dow Jones Fut", "S&P 500", "Nasdaq", "Hang Seng", "Gold (Fut)", "Bitcoin"]
+    
+    last_y = 0
+    for i, key in enumerate(order):
+        val, chg = data.get(key, ("N/A", "0.00%"))
+        row = i // 2
+        col = i % 2
+        x = col_1_x if col == 0 else col_2_x
+        y = start_y + (row * (card_h + gap_y))
+        draw_card_compact(d, x, y, card_w, card_h, key.upper(), val, chg)
+        last_y = y + card_h
 
-    watermark(d)
-    path = "/tmp/global_market.png"
-    img.save(path)
-    return path
-
-def create_mtf_image(data):
-    img = Image.new("RGB", (WIDTH, HEIGHT), (40, 20, 20))
-    d = ImageDraw.Draw(img)
-
-    draw_text(d, (WIDTH / 2, 150), "MTF Insights", get_font(78), (255, 255, 255))
-    draw_text(d, (WIDTH / 2, 230), f"(as on {data.get('date')})", get_font(48), (200, 180, 200))
-
-    y = 380
-    for k, v in data.items():
-        if k == "date":
-            continue
-        draw_text(d, (80, y), f"- {k}:", get_font(46), (255, 255, 255), "ls")
-        draw_text(d, (WIDTH - 80, y), v, get_font(46), (255, 223, 186), "rs")
-        y += 120
-
-    watermark(d)
-    path = "/tmp/mtf.png"
-    img.save(path)
-    return path
-
-# --- Tweet ---
-def build_tweet(data, t):
-    if t == "global":
-        lines = [f"Global Market Update – {datetime.now().strftime('%d %b, %Y')}\n"]
-        for k, (v, c) in data.items():
-            lines.append(f"{k}: {v} ({c})")
-        lines.append("\n#GIFTNIFTY #Nifty #DowJones #Nasdaq")
+    # Bottom Section (3 Columns)
+    bottom_y = last_y + 45
+    col1_x, col2_x, col3_x = 60, 420, 760
+    
+    # 1. Ban List
+    draw_text(d, (col1_x, bottom_y), "F&O BAN LIST", get_font(24, bold=True), COLOR_BAN, anchor="lt")
+    ban_curr_y = bottom_y + 40
+    if not ban_list:
+        draw_text(d, (col1_x, ban_curr_y), "None", get_font(24), COLOR_TEXT_MAIN, anchor="lt")
     else:
-        lines = [f"MTF Insights (as on {data.get('date')})\n"]
-        for k, v in data.items():
-            if k != "date":
-                lines.append(f"- {k}: {v}")
-        lines.append("\n#MTF #Nifty #BankNifty")
-    return "\n".join(lines)
+        for item in ban_list[:5]:
+            draw_text(d, (col1_x, ban_curr_y), f"• {item}", get_font(24), COLOR_TEXT_MAIN, anchor="lt")
+            ban_curr_y += 35
+        if len(ban_list) > 5:
+             draw_text(d, (col1_x, ban_curr_y), f"+ {len(ban_list)-5} more", get_font(22), COLOR_TEXT_SUB, anchor="lt")
 
-def post_to_twitter(text, image):
-    client = tweepy.Client(
-        consumer_key=os.getenv("TWITTER_API_KEY"),
-        consumer_secret=os.getenv("TWITTER_API_SECRET"),
-        access_token=os.getenv("TWITTER_ACCESS_TOKEN"),
-        access_token_secret=os.getenv("TWITTER_ACCESS_TOKEN_SECRET"),
-    )
+    # 2. Highs
+    highs = high_low_data.get('highs', [])
+    draw_text(d, (col2_x, bottom_y), f"52W HIGHS ({len(highs)})", get_font(24, bold=True), COLOR_HIGH, anchor="lt")
+    high_curr_y = bottom_y + 40
+    if not highs:
+        draw_text(d, (col2_x, high_curr_y), "None", get_font(24), COLOR_TEXT_MAIN, anchor="lt")
+    else:
+        for item in highs[:5]:
+            draw_text(d, (col2_x, high_curr_y), f"▲ {item}", get_font(24), COLOR_TEXT_MAIN, anchor="lt")
+            high_curr_y += 35
+        if len(highs) > 5:
+             draw_text(d, (col2_x, high_curr_y), f"+ {len(highs)-5} more", get_font(22), COLOR_TEXT_SUB, anchor="lt")
 
-    auth = tweepy.OAuth1UserHandler(
-        os.getenv("TWITTER_API_KEY"),
-        os.getenv("TWITTER_API_SECRET"),
-        os.getenv("TWITTER_ACCESS_TOKEN"),
-        os.getenv("TWITTER_ACCESS_TOKEN_SECRET"),
-    )
+    # 3. Lows
+    lows = high_low_data.get('lows', [])
+    draw_text(d, (col3_x, bottom_y), f"52W LOWS ({len(lows)})", get_font(24, bold=True), COLOR_NEUTRAL, anchor="lt")
+    low_curr_y = bottom_y + 40
+    if not lows:
+        draw_text(d, (col3_x, low_curr_y), "None", get_font(24), COLOR_TEXT_MAIN, anchor="lt")
+    else:
+        for item in lows[:5]:
+            draw_text(d, (col3_x, low_curr_y), f"▼ {item}", get_font(24), COLOR_TEXT_MAIN, anchor="lt")
+            low_curr_y += 35
+        if len(lows) > 5:
+             draw_text(d, (col3_x, low_curr_y), f"+ {len(lows)-5} more", get_font(22), COLOR_TEXT_SUB, anchor="lt")
 
-    api = tweepy.API(auth)
-    media = api.media_upload(image)
-    client.create_tweet(text=text, media_ids=[media.media_id_string])
+    # Footer
+    date_str_watermark = datetime.now().strftime("%d-%b-%Y")
+    footer_txt = f"@ChartWizMani | Data as of {date_str_watermark} | For Informational Use Only"
+    draw_text(d, (WIDTH / 2, HEIGHT - 35), footer_txt, get_font(24), WATERMARK_COLOR)
 
-# --- Routes ---
-@app.route("/global-market-update")
-def global_update():
-    data = fetch_global_market_data()
-    if not data:
-        return jsonify({"status": "error"}), 500
-    img = create_market_image(data)
-    post_to_twitter(build_tweet(data, "global"), img)
-    return jsonify({"status": "success"})
+    img.save(OUTPUT_FILE)
+    print(f"✅ SUCCESS! Image saved: {OUTPUT_FILE}")
+    return OUTPUT_FILE
 
-@app.route("/mtf-insights-update")
-def mtf_update():
-    data = fetch_mtf_data()
-    if not data:
-        return jsonify({"status": "error"}), 500
-    img = create_mtf_image(data)
-    post_to_twitter(build_tweet(data, "mtf"), img)
-    return jsonify({"status": "success"})
+# --- TWITTER POSTING ---
+def post_to_twitter(image_path, data):
+    print("4. Posting to Twitter...")
+    
+    api_key = os.environ.get("TWITTER_API_KEY")
+    api_secret = os.environ.get("TWITTER_API_SECRET")
+    access_token = os.environ.get("TWITTER_ACCESS_TOKEN")
+    access_secret = os.environ.get("TWITTER_ACCESS_TOKEN_SECRET")
 
-@app.route("/")
-def home():
-    return jsonify({"status": "ok", "message": "ChartWizMani Tweet Bot running"})
+    if not all([api_key, api_secret, access_token, access_secret]):
+        print("❌ Error: Twitter Keys not found in environment!")
+        return
+
+    try:
+        auth = tweepy.OAuth1UserHandler(api_key, api_secret, access_token, access_secret)
+        api = tweepy.API(auth)
+        media = api.media_upload(image_path)
+
+        client = tweepy.Client(
+            consumer_key=api_key, consumer_secret=api_secret,
+            access_token=access_token, access_token_secret=access_secret
+        )
+        
+        # --- FORMATTED TWEET LOGIC ---
+        
+        # 1. Header (Global Market Update – 17 Jan, 2026)
+        date_str = datetime.now().strftime('%d %b, %Y')
+        tweet_text = f"Global Market Update – {date_str}\n\n"
+        
+        # 2. List Items
+        # Define exact order and display names
+        display_map = {
+            "GIFTNIFTY": "GIFTNIFTY",
+            "Nikkei 225": "Nikkei 225",
+            "Dow Jones Fut": "Dow Jones Futures",
+            "S&P 500": "S&P 500",
+            "Nasdaq": "Nasdaq",
+            "Hang Seng": "Hang Seng"
+        }
+        
+        # We loop through the exact list requested
+        key_order = ["GIFTNIFTY", "Nikkei 225", "Dow Jones Fut", "S&P 500", "Nasdaq", "Hang Seng"]
+        
+        for key in key_order:
+            if key in data:
+                val, chg = data[key]
+                name = display_map.get(key, key)
+                tweet_text += f"{name}: {val} ({chg})\n"
+                
+        # 3. Hashtags
+        tweet_text += "\n#GIFTNIFTY #Nifty #DowJones #Nasdaq $bitcoin"
+        # -----------------------------
+
+        client.create_tweet(text=tweet_text, media_ids=[media.media_id_string])
+        print("🚀 Tweet Posted Successfully!")
+    except Exception as e:
+        print(f"❌ Twitter Error: {e}")
+
+# --- MAIN EXECUTION ---
+if __name__ == "__main__":
+    print("--- STARTING CLOUD AUTOMATION ---")
+    m_data = fetch_market_data()
+    fno_list = fetch_fo_ban_list()
+    hl_data = fetch_52wk_data()
+    
+    img_path = create_image(m_data, fno_list, hl_data)
+    
+    if os.environ.get("TWITTER_API_KEY"):
+        post_to_twitter(img_path, m_data)
+    else:
+        print("⚠️ No Twitter keys found (Local Mode). Image saved but not posted.")
+    
+    print("--- DONE ---")
