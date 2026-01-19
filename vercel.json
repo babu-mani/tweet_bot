@@ -8,15 +8,5 @@
       "maxDuration": 10,
       "memory": 1024
     }
-  },
-  "crons": [
-    {
-      "path": "/global-market-update",
-      "schedule": "0 3 * * *"
-    },
-    {
-      "path": "/mtf-insights-update",
-      "schedule": "15 3 * * *"
-    }
-  ]
+  }
 }
